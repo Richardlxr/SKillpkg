@@ -1,0 +1,66 @@
+{
+  "name": "skillpkg",
+  "version": "0.3.0",
+  "description": "Cross-platform AI Agent Skills Package Manager",
+  "main": "dist/index.js",
+  "files": [
+    "dist"
+  ],
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Richardlxr/SKillpkg.git"
+  },
+  "bugs": {
+    "url": "https://github.com/Richardlxr/SKillpkg/issues"
+  },
+  "homepage": "https://github.com/Richardlxr/SKillpkg#readme",
+  "bin": {
+    "skm": "dist/index.js"
+  },
+  "type": "module",
+  "scripts": {
+    "clean": "node -e \"require('node:fs').rmSync('dist', { recursive: true, force: true })\"",
+    "build": "npm run clean && tsc && node scripts/make-bin-executable.mjs",
+    "dev": "tsx src/index.ts",
+    "start": "node dist/index.js",
+    "test": "vitest run"
+  },
+  "keywords": [
+    "agent-skills",
+    "ai",
+    "package-manager",
+    "skills",
+    "mcp",
+    "claude-code",
+    "codex",
+    "antigravity",
+    "antigravity-cli"
+  ],
+  "author": "skillpkg contributors",
+  "license": "MIT",
+  "dependencies": {
+    "better-sqlite3": "^11.9.1",
+    "boxen": "^8.0.1",
+    "chalk": "^5.4.1",
+    "cli-table3": "^0.6.5",
+    "commander": "^13.1.0",
+    "gray-matter": "^4.0.3",
+    "inquirer": "^12.6.0",
+    "ora": "^8.2.0",
+    "semver": "^7.7.2",
+    "simple-git": "^3.27.0",
+    "yaml": "^2.7.1"
+  },
+  "devDependencies": {
+    "@types/better-sqlite3": "^7.6.13",
+    "@types/inquirer": "^9.0.7",
+    "@types/node": "^22.15.17",
+    "@types/semver": "^7.7.0",
+    "tsx": "^4.19.4",
+    "typescript": "^5.8.3",
+    "vitest": "^1.5.0"
+  }
+}
