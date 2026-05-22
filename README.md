@@ -100,6 +100,8 @@ skm install https://github.com/team/workflow-skill#skills/reviewer --agent curso
 skm install owner/repo -y --agent all
 ```
 
+When a repository contains multiple skills, interactive install first asks for an optional name/path keyword. Leave it blank to show every skill, or type a keyword such as `reviewer` to narrow the checkbox list before selecting.
+
 Supported agent ids:
 
 ```text

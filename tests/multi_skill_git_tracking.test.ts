@@ -89,6 +89,7 @@ describe('multi-skill project git tracking', () => {
     const { installSkill } = await import('../src/core/installer.js');
     await setGitPreference('ask');
     mocks.prompt
+      .mockResolvedValueOnce({ skillSearch: '' })
       .mockResolvedValueOnce({ selectedSkills: ['skills/alpha'] })
       .mockResolvedValueOnce({ choice: 'ignore' });
 
@@ -97,20 +98,48 @@ describe('multi-skill project git tracking', () => {
       noScripts: true,
     });
 
-    expect(mocks.prompt).toHaveBeenCalledTimes(2);
-    expect(mocks.prompt.mock.calls[0][0][0].name).toBe('selectedSkills');
-    expect(mocks.prompt.mock.calls[1][0][0].name).toBe('choice');
+    expect(mocks.prompt).toHaveBeenCalledTimes(3);
+    expect(mocks.prompt.mock.calls[0][0][0].name).toBe('skillSearch');
+    expect(mocks.prompt.mock.calls[1][0][0].name).toBe('selectedSkills');
+    expect(mocks.prompt.mock.calls[2][0][0].name).toBe('choice');
     const gitignore = await readFile(join(projectDir, '.gitignore'), 'utf-8');
     expect(gitignore).toContain('# === skillpkg managed');
     expect(gitignore).toContain('.agents/skills/alpha');
     expect(gitignore.split('\n')).not.toContain('.agents/skills/');
   });
 
+  it('filters multi-skill install choices by skill name', async () => {
+    const { installSkill } = await import('../src/core/installer.js');
+    await setGitPreference('track');
+    await writeFile(join(projectDir, 'skm.mod'), 'module demo\n');
+    mocks.prompt
+      .mockResolvedValueOnce({ skillSearch: 'bet' })
+      .mockResolvedValueOnce({ selectedSkills: ['skills/beta'] });
+
+    await installSkill('git@example.com:org/repo.git#v1.2.3', {
+      scope: 'project',
+      noScripts: true,
+    });
+
+    const checkboxQuestion = mocks.prompt.mock.calls[1][0][0];
+    const checkboxChoices = checkboxQuestion.choices as Array<{ name: string; value: string }>;
+    expect(checkboxQuestion.message).toContain('1 of 2 skills matching "bet"');
+    expect(checkboxChoices).toHaveLength(1);
+    expect(checkboxChoices[0].name).toContain('beta');
+    expect(checkboxChoices[0].value).toBe('skills/beta');
+
+    const mod = await readFile(join(projectDir, 'skm.mod'), 'utf-8');
+    expect(mod).toContain('skill git@example.com:org/repo.git#skills/beta v1.2.3');
+    expect(mod).not.toContain('skills/alpha');
+  });
+
   it('saves selected multi-skill project installs to skm.mod', async () => {
     const { installSkill } = await import('../src/core/installer.js');
     await setGitPreference('track');
     await writeFile(join(projectDir, 'skm.mod'), 'module demo\n');
-    mocks.prompt.mockResolvedValueOnce({ selectedSkills: ['skills/alpha'] });
+    mocks.prompt
+      .mockResolvedValueOnce({ skillSearch: '' })
+      .mockResolvedValueOnce({ selectedSkills: ['skills/alpha'] });
 
     await installSkill('git@example.com:org/repo.git#v1.2.3', {
       scope: 'project',
@@ -119,14 +148,16 @@ describe('multi-skill project git tracking', () => {
 
     const mod = await readFile(join(projectDir, 'skm.mod'), 'utf-8');
     expect(mod).toContain('skill git@example.com:org/repo.git#skills/alpha v1.2.3');
-    expect(mocks.prompt).toHaveBeenCalledOnce();
+    expect(mocks.prompt).toHaveBeenCalledTimes(2);
   });
 
   it('honors --no-save for selected multi-skill project installs', async () => {
     const { installSkill } = await import('../src/core/installer.js');
     await setGitPreference('track');
     await writeFile(join(projectDir, 'skm.mod'), 'module demo\n');
-    mocks.prompt.mockResolvedValueOnce({ selectedSkills: ['skills/alpha'] });
+    mocks.prompt
+      .mockResolvedValueOnce({ skillSearch: '' })
+      .mockResolvedValueOnce({ selectedSkills: ['skills/alpha'] });
 
     await installSkill('git@example.com:org/repo.git#v1.2.3', {
       scope: 'project',

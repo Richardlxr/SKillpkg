@@ -40,6 +40,13 @@ import {
 /** Track install path for cycle detection */
 const installStack = new Set<string>();
 
+interface SkillSelectionChoice {
+  name: string;
+  value: string;
+  skillName: string;
+  subPath: string;
+}
+
 /**
  * Install a skill from a source string
  * Source formats:
@@ -120,24 +127,7 @@ export async function installSkill(
           spinner.info(`Automatically selecting all ${selectedSkills.length} skills found in repository`);
         } else {
           spinner.stop();
-          const { default: inquirer } = await import('inquirer');
-          
-          const choices = foundSkills.map(p => {
-            const subPath = relative(repoDir, dirname(p)) || '.';
-            return {
-              name: subPath,
-              value: subPath
-            };
-          });
-          
-          const answer = await inquirer.prompt([{
-            type: 'checkbox',
-            name: 'selectedSkills',
-            message: `Found ${foundSkills.length} skills in this repository. Select which ones to install:`,
-            choices,
-            validate: (ans) => ans.length > 0 ? true : 'You must select at least one skill to install'
-          }]);
-          selectedSkills = answer.selectedSkills;
+          selectedSkills = await promptForSelectedSkills(repoDir, foundSkills);
         }
         
         // Loop over choices and install them recursively
@@ -393,6 +383,77 @@ export async function installSkill(
     // Always clean up cycle detection to prevent stale entries
     if (installKey) installStack.delete(installKey);
   }
+}
+
+async function promptForSelectedSkills(repoDir: string, foundSkills: string[]): Promise<string[]> {
+  const { default: inquirer } = await import('inquirer');
+  const choices = await buildSkillSelectionChoices(repoDir, foundSkills);
+
+  while (true) {
+    const searchAnswer = await inquirer.prompt<{ skillSearch?: string }>([{
+      type: 'input',
+      name: 'skillSearch',
+      message: `Search skills by name/path (${choices.length} found, leave blank for all):`,
+    }]);
+    const query = (searchAnswer.skillSearch || '').trim();
+    const filteredChoices = filterSkillSelectionChoices(choices, query);
+
+    if (filteredChoices.length === 0) {
+      logger.warn(`No skills matched "${query}". Try another keyword or leave blank to show all.`);
+      continue;
+    }
+
+    const answer = await inquirer.prompt<{ selectedSkills: string[] }>([{
+      type: 'checkbox',
+      name: 'selectedSkills',
+      message: query
+        ? `Found ${filteredChoices.length} of ${choices.length} skills matching "${query}". Select which ones to install:`
+        : `Found ${choices.length} skills in this repository. Select which ones to install:`,
+      choices: filteredChoices.map(({ name, value }) => ({ name, value })),
+      pageSize: Math.min(20, Math.max(filteredChoices.length, 5)),
+      validate: (ans: unknown) => Array.isArray(ans) && ans.length > 0
+        ? true
+        : 'You must select at least one skill to install',
+    }]);
+
+    return answer.selectedSkills;
+  }
+}
+
+async function buildSkillSelectionChoices(repoDir: string, foundSkills: string[]): Promise<SkillSelectionChoice[]> {
+  return Promise.all(foundSkills.map(async (skillMdPath) => {
+    const skillDir = dirname(skillMdPath);
+    const subPath = relative(repoDir, skillDir) || '.';
+    const frontmatter = await parseSkillMd(skillDir);
+    const skillName = frontmatter?.name || subPath;
+    const name = skillName === subPath
+      ? skillName
+      : `${skillName} ${chalk.gray(`(${subPath})`)}`;
+
+    return {
+      name,
+      value: subPath,
+      skillName,
+      subPath,
+    };
+  }));
+}
+
+function filterSkillSelectionChoices(
+  choices: SkillSelectionChoice[],
+  query: string
+): SkillSelectionChoice[] {
+  const terms = query
+    .toLowerCase()
+    .split(/\s+/)
+    .filter(Boolean);
+
+  if (terms.length === 0) return choices;
+
+  return choices.filter((choice) => {
+    const searchable = `${choice.skillName} ${choice.subPath}`.toLowerCase();
+    return terms.every((term) => searchable.includes(term));
+  });
 }
 
 async function removeShadowedGlobalSkill(

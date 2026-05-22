@@ -100,6 +100,8 @@ skm install https://github.com/team/workflow-skill#skills/reviewer --agent curso
 skm install owner/repo -y --agent all
 ```
 
+当仓库里包含多个 skills 时，交互式安装会先询问一个可选的 name/path 关键词。直接回车会展示全部 skills；输入 `reviewer` 之类的关键词后，再从过滤后的复选列表里选择要安装的项。
+
 支持的 Agent id：
 
 ```text
