@@ -1,9 +1,11 @@
 /**
  * Codex (OpenAI) Adapter
  */
-import type { AgentType, InstallScope, McpRegistryEntry, DiscoveredMcp } from '../types/index.js';
+import { join } from 'node:path';
+import type { AgentType, InstallScope, McpRegistryEntry, DiscoveredMcp, InstalledSkillInfo } from '../types/index.js';
 import { AGENT_PATHS } from '../utils/platform.js';
-import { pathExists, readFileOrNull, writeFileSafe } from '../utils/fs.js';
+import { listSubdirs, pathExists, readFileOrNull, writeFileSafe } from '../utils/fs.js';
+import { parseSkillMd } from '../parsers/index.js';
 import { logger } from '../utils/logger.js';
 import { BaseAdapter } from './base.js';
 
@@ -18,7 +20,29 @@ export class CodexAdapter extends BaseAdapter {
   }
 
   async detect(): Promise<boolean> {
-    return pathExists(AGENT_PATHS.codex.global());
+    return (
+      await pathExists(AGENT_PATHS.codex.global()) ||
+      await pathExists(AGENT_PATHS.codex.appSkills()) ||
+      await pathExists(AGENT_PATHS.codex.mcpConfig('global')) ||
+      await pathExists(AGENT_PATHS.codex.configDir())
+    );
+  }
+
+  async listInstalled(scope: InstallScope): Promise<InstalledSkillInfo[]> {
+    if (scope !== 'global') {
+      return super.listInstalled(scope);
+    }
+
+    const byName = new Map<string, InstalledSkillInfo>();
+    for (const skillsDir of [AGENT_PATHS.codex.global(), AGENT_PATHS.codex.appSkills()]) {
+      for (const skill of await listInstalledCodexSkills(skillsDir)) {
+        if (!byName.has(skill.name)) {
+          byName.set(skill.name, skill);
+        }
+      }
+    }
+
+    return Array.from(byName.values());
   }
 
   async configureMCP(mcp: McpRegistryEntry, env: Record<string, string>, scope: InstallScope = 'global'): Promise<void> {
@@ -69,6 +93,32 @@ export class CodexAdapter extends BaseAdapter {
 
     return Array.from(byName.values());
   }
+}
+
+async function listInstalledCodexSkills(skillsDir: string): Promise<InstalledSkillInfo[]> {
+  if (!(await pathExists(skillsDir))) return [];
+
+  const dirs = await listSubdirs(skillsDir);
+  const results: InstalledSkillInfo[] = [];
+
+  for (const dir of dirs) {
+    const fullPath = join(skillsDir, dir);
+    const hasSkillMd = await pathExists(join(fullPath, 'SKILL.md'));
+    if (!hasSkillMd) continue;
+
+    const fm = await parseSkillMd(fullPath);
+    const name = fm?.name || dir;
+    const description = fm?.description;
+
+    results.push({
+      name,
+      path: fullPath,
+      hasSkillMd,
+      description,
+    });
+  }
+
+  return results;
 }
 
 function upsertCodexMcpBlock(content: string, mcp: McpRegistryEntry, env: Record<string, string>): string {
