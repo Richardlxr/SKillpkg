@@ -364,7 +364,7 @@ Google is transitioning Gemini CLI users to Antigravity CLI, so skm no longer su
 | Antigravity 2.0 / Editor | `antigravity` | `~/.gemini/antigravity/skills/`, `.agents/skills/` | `~/.gemini/antigravity/mcp_config.json` |
 | Antigravity CLI | `antigravity-cli` | `~/.gemini/antigravity-cli/skills/`, `.agents/skills/` | `~/.gemini/antigravity-cli/mcp_config.json`, `.agents/mcp_config.json` |
 | Claude Code | `claude-code` | `~/.claude/skills/`, `.agents/skills/` + `.claude/skills/` symlink | `~/.claude.json`, `.mcp.json` |
-| Codex (OpenAI) | `codex` | `~/.agents/skills/`, `.agents/skills/` | `~/.codex/config.toml`, `.codex/config.toml` |
+| Codex (OpenAI) | `codex` | `~/.agents/skills/` (also scans `~/.codex/skills/`), `.agents/skills/` | `~/.codex/config.toml`, `.codex/config.toml` |
 | Cursor | `cursor` | `~/.cursor/skills/`, `.agents/skills/` + `.cursor/skills/` symlink | `~/.cursor/mcp.json`, `.cursor/mcp.json` |
 
 ### Official Path References

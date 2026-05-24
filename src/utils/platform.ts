@@ -95,6 +95,8 @@ export const AGENT_PATHS = {
   },
   codex: {
     global: () => join(getHomeDir(), '.agents', 'skills'),
+    appSkills: () => join(getHomeDir(), '.codex', 'skills'),
+    configDir: () => join(getHomeDir(), '.codex'),
     project: unifiedProjectSkillsDir,
     mcpConfig: (scope: InstallScope = 'global', cwd: string = process.cwd()) =>
       scope === 'project' ? join(cwd, '.codex', 'config.toml') : join(getHomeDir(), '.codex', 'config.toml'),
