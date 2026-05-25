@@ -364,7 +364,7 @@ Google 正在把 Gemini CLI 用户迁移到 Antigravity CLI，因此 skm 不再�
 | Antigravity 2.0 / Editor | `antigravity` | `~/.gemini/antigravity/skills/`, `.agents/skills/` | `~/.gemini/antigravity/mcp_config.json` |
 | Antigravity CLI | `antigravity-cli` | `~/.gemini/antigravity-cli/skills/`, `.agents/skills/` | `~/.gemini/antigravity-cli/mcp_config.json`, `.agents/mcp_config.json` |
 | Claude Code | `claude-code` | `~/.claude/skills/`, `.agents/skills/` + `.claude/skills/` symlink | `~/.claude.json`, `.mcp.json` |
-| Codex (OpenAI) | `codex` | `~/.agents/skills/`（同时扫描 `~/.codex/skills/`）, `.agents/skills/` | `~/.codex/config.toml`, `.codex/config.toml` |
+| Codex (OpenAI) | `codex` | `$CODEX_HOME/skills/` 或 `~/.codex/skills/`（同时扫描旧的 `~/.agents/skills/`）, `.agents/skills/` | `$CODEX_HOME/config.toml` 或 `~/.codex/config.toml`, `.codex/config.toml` |
 | Cursor | `cursor` | `~/.cursor/skills/`, `.agents/skills/` + `.cursor/skills/` symlink | `~/.cursor/mcp.json`, `.cursor/mcp.json` |
 
 ### 官方路径来源

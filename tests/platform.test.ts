@@ -1,12 +1,12 @@
 import { afterEach, describe, expect, it } from 'vitest';
 import { join } from 'node:path';
-import { AGENT_PATHS, getHomeDir, unifiedProjectSkillsDir } from '../src/utils/platform.js';
+import { AGENT_PATHS, getCodexHomeDir, getHomeDir, unifiedProjectSkillsDir } from '../src/utils/platform.js';
 import { fileUrlFromPath, isLocalPathSource, localPathFromSource, resolveLocalPathSource } from '../src/utils/path_source.js';
 
 const platformDescriptor = Object.getOwnPropertyDescriptor(process, 'platform');
 
 describe('platform paths', () => {
-  const oldEnv = snapshotEnv(['SKILLPKG_HOME_DIR', 'HOME', 'USERPROFILE', 'APPDATA']);
+  const oldEnv = snapshotEnv(['SKILLPKG_HOME_DIR', 'CODEX_HOME', 'HOME', 'USERPROFILE', 'APPDATA']);
 
   afterEach(() => {
     restoreEnv(oldEnv);
@@ -26,6 +26,7 @@ describe('platform paths', () => {
 
   it('matches official agent skill and MCP locations', () => {
     process.env['SKILLPKG_HOME_DIR'] = '/Users/alice';
+    delete process.env['CODEX_HOME'];
     const cwd = '/work/project';
 
     expect(unifiedProjectSkillsDir(cwd)).toBe(join(cwd, '.agents', 'skills'));
@@ -34,10 +35,21 @@ describe('platform paths', () => {
     expect(AGENT_PATHS['antigravity-cli'].mcpConfig('project', cwd)).toBe(join(cwd, '.agents', 'mcp_config.json'));
     expect(AGENT_PATHS['claude-code'].project(cwd)).toBe(join(cwd, '.agents', 'skills'));
     expect(AGENT_PATHS['claude-code'].symlinkDir(cwd)).toBe(join(cwd, '.claude', 'skills'));
-    expect(AGENT_PATHS.codex.global()).toBe(join('/Users/alice', '.agents', 'skills'));
+    expect(getCodexHomeDir()).toBe(join('/Users/alice', '.codex'));
+    expect(AGENT_PATHS.codex.global()).toBe(join('/Users/alice', '.codex', 'skills'));
+    expect(AGENT_PATHS.codex.legacyGlobal()).toBe(join('/Users/alice', '.agents', 'skills'));
     expect(AGENT_PATHS.codex.project(cwd)).toBe(join(cwd, '.agents', 'skills'));
     expect(AGENT_PATHS.cursor.project(cwd)).toBe(join(cwd, '.agents', 'skills'));
     expect(AGENT_PATHS.cursor.symlinkDir(cwd)).toBe(join(cwd, '.cursor', 'skills'));
+  });
+
+  it('honors CODEX_HOME for Codex global skills and config', () => {
+    process.env['SKILLPKG_HOME_DIR'] = '/Users/alice';
+    process.env['CODEX_HOME'] = '/custom/codex-home';
+
+    expect(getCodexHomeDir()).toBe('/custom/codex-home');
+    expect(AGENT_PATHS.codex.global()).toBe(join('/custom/codex-home', 'skills'));
+    expect(AGENT_PATHS.codex.mcpConfig('global')).toBe(join('/custom/codex-home', 'config.toml'));
   });
 });
 

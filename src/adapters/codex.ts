@@ -22,7 +22,7 @@ export class CodexAdapter extends BaseAdapter {
   async detect(): Promise<boolean> {
     return (
       await pathExists(AGENT_PATHS.codex.global()) ||
-      await pathExists(AGENT_PATHS.codex.appSkills()) ||
+      await pathExists(AGENT_PATHS.codex.legacyGlobal()) ||
       await pathExists(AGENT_PATHS.codex.mcpConfig('global')) ||
       await pathExists(AGENT_PATHS.codex.configDir())
     );
@@ -34,7 +34,7 @@ export class CodexAdapter extends BaseAdapter {
     }
 
     const byName = new Map<string, InstalledSkillInfo>();
-    for (const skillsDir of [AGENT_PATHS.codex.global(), AGENT_PATHS.codex.appSkills()]) {
+    for (const skillsDir of [AGENT_PATHS.codex.global(), AGENT_PATHS.codex.legacyGlobal()]) {
       for (const skill of await listInstalledCodexSkills(skillsDir)) {
         if (!byName.has(skill.name)) {
           byName.set(skill.name, skill);

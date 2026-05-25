@@ -31,6 +31,14 @@ export function getHomeDir(): string {
   return homedir();
 }
 
+/** Get Codex's home directory, matching Codex's own CODEX_HOME convention. */
+export function getCodexHomeDir(): string {
+  if (process.env['CODEX_HOME']) {
+    return process.env['CODEX_HOME'];
+  }
+  return join(getHomeDir(), '.codex');
+}
+
 /** Get skillpkg data directory */
 export function getDataDir(): string {
   // Allow override via environment variable
@@ -94,12 +102,12 @@ export const AGENT_PATHS = {
       scope === 'project' ? join(cwd, '.mcp.json') : join(getHomeDir(), '.claude.json'),
   },
   codex: {
-    global: () => join(getHomeDir(), '.agents', 'skills'),
-    appSkills: () => join(getHomeDir(), '.codex', 'skills'),
-    configDir: () => join(getHomeDir(), '.codex'),
+    global: () => join(getCodexHomeDir(), 'skills'),
+    legacyGlobal: () => join(getHomeDir(), '.agents', 'skills'),
+    configDir: getCodexHomeDir,
     project: unifiedProjectSkillsDir,
     mcpConfig: (scope: InstallScope = 'global', cwd: string = process.cwd()) =>
-      scope === 'project' ? join(cwd, '.codex', 'config.toml') : join(getHomeDir(), '.codex', 'config.toml'),
+      scope === 'project' ? join(cwd, '.codex', 'config.toml') : join(getCodexHomeDir(), 'config.toml'),
     legacyMcpConfig: (cwd: string = process.cwd()) => join(cwd, '.mcp.json'),
   },
   cursor: {

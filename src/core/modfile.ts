@@ -1,5 +1,4 @@
 import { basename, join } from 'node:path';
-import inquirer from 'inquirer';
 import { parseModFile, generateModFile } from '../parsers/mod.js';
 import { pathExists, readFileOrNull, writeFileSafe } from '../utils/fs.js';
 import { logger } from '../utils/logger.js';
@@ -61,18 +60,6 @@ export async function removeSkillRequirement(source: string, cwd: string = proce
   logger.info(`Removed project dependency from skm.mod: ${source}`);
 }
 
-async function shouldCreateModFile(cwd: string, options: SaveSkillRequirementOptions): Promise<boolean> {
-  if (!options.allowCreate) return false;
-  if (options.save === true || options.yes) return true;
-  if (!(await pathExists(join(cwd, '.git')))) return false;
-  if (!process.stdin.isTTY || !process.stdout.isTTY) return false;
-
-  const { create } = await inquirer.prompt<{ create: boolean }>([{
-    type: 'confirm',
-    name: 'create',
-    message: 'No skm.mod found. Save this project skill dependency to a new skm.mod?',
-    default: true,
-  }]);
-
-  return create;
+async function shouldCreateModFile(_cwd: string, options: SaveSkillRequirementOptions): Promise<boolean> {
+  return options.allowCreate === true && options.save !== false;
 }

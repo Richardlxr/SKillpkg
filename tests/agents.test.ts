@@ -20,22 +20,26 @@ describe('Codex adapter detection', () => {
   let root: string;
   let oldHome: string | undefined;
   let oldSkillpkgHome: string | undefined;
+  let oldCodexHome: string | undefined;
 
   beforeEach(async () => {
     root = await mkdtemp(join(tmpdir(), 'skm-codex-detect-'));
     oldHome = process.env['HOME'];
     oldSkillpkgHome = process.env['SKILLPKG_HOME_DIR'];
+    oldCodexHome = process.env['CODEX_HOME'];
     process.env['HOME'] = join(root, 'home');
     process.env['SKILLPKG_HOME_DIR'] = join(root, 'home');
+    delete process.env['CODEX_HOME'];
   });
 
   afterEach(async () => {
     restoreEnv('HOME', oldHome);
     restoreEnv('SKILLPKG_HOME_DIR', oldSkillpkgHome);
+    restoreEnv('CODEX_HOME', oldCodexHome);
     await rm(root, { recursive: true, force: true });
   });
 
-  it('detects Codex from its config directory even before ~/.agents/skills exists', async () => {
+  it('detects Codex from its config directory even before the skills directory exists', async () => {
     const home = process.env['HOME'] as string;
     await mkdir(join(home, '.codex'), { recursive: true });
     await writeFile(join(home, '.codex', 'config.toml'), '');
@@ -45,10 +49,26 @@ describe('Codex adapter detection', () => {
     expect(await adapter.detect()).toBe(true);
   });
 
-  it('scans user skills from the Codex app skills directory', async () => {
+  it('uses the Codex home skills directory for global installs', async () => {
     const home = process.env['HOME'] as string;
-    const legacySkillDir = join(home, '.codex', 'skills', 'legacy-codex-skill');
-    await writeSkill(legacySkillDir, 'legacy-codex-skill', 'from codex app dir');
+    const skillDir = join(home, '.codex', 'skills', 'codex-home-skill');
+    await writeSkill(skillDir, 'codex-home-skill', 'from codex home dir');
+
+    const adapter = new CodexAdapter();
+
+    expect(adapter.getSkillsDir('global')).toBe(join(home, '.codex', 'skills'));
+    expect(await adapter.listInstalled('global')).toContainEqual(expect.objectContaining({
+      name: 'codex-home-skill',
+      path: skillDir,
+      hasSkillMd: true,
+      description: 'from codex home dir',
+    }));
+  });
+
+  it('still scans legacy ~/.agents/skills for previously installed Codex skills', async () => {
+    const home = process.env['HOME'] as string;
+    const legacySkillDir = join(home, '.agents', 'skills', 'legacy-codex-skill');
+    await writeSkill(legacySkillDir, 'legacy-codex-skill', 'from legacy shared dir');
 
     const adapter = new CodexAdapter();
     const installed = await adapter.listInstalled('global');
@@ -58,7 +78,7 @@ describe('Codex adapter detection', () => {
       name: 'legacy-codex-skill',
       path: legacySkillDir,
       hasSkillMd: true,
-      description: 'from codex app dir',
+      description: 'from legacy shared dir',
     });
   });
 });
