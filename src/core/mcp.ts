@@ -80,12 +80,19 @@ function rowToEnv(row: ManagedMcpRow): Record<string, string> {
   return parseJsonValue<Record<string, string>>(row.env, {});
 }
 
-function assignmentFor(targetAgent: TargetAgent, agentNames: AgentType[]): string {
-  return targetAgent === 'all' ? 'all' : JSON.stringify(agentNames);
+function assignmentFor(targetAgent: TargetAgent, agentNames: AgentType[], scope: InstallScope): string {
+  if (targetAgent === 'all' && scope !== 'project') return 'all';
+  return JSON.stringify(agentNames);
 }
 
-function mergeAssignment(existing: string | null | undefined, targetAgent: TargetAgent, agentNames: AgentType[]): string {
-  if (targetAgent === 'all') return 'all';
+function mergeAssignment(
+  existing: string | null | undefined,
+  targetAgent: TargetAgent,
+  agentNames: AgentType[],
+  scope: InstallScope
+): string {
+  if (targetAgent === 'all' && scope !== 'project') return 'all';
+  if (targetAgent === 'all') return JSON.stringify(agentNames);
   if (!existing || existing === 'all') return JSON.stringify(agentNames);
 
   const parsed = parseJsonValue<string[]>(existing, []);
@@ -111,6 +118,19 @@ function formatAssigned(assigned: string | null | undefined): string {
 
 function agentSupportsProjectMcp(agent: AgentAdapter): boolean {
   return ['antigravity-cli', 'claude-code', 'codex', 'cursor'].includes(agent.name);
+}
+
+function filterAgentsForMcpScope(agents: AgentAdapter[], scope: InstallScope): AgentAdapter[] {
+  if (scope !== 'project') return agents;
+
+  const supported = agents.filter(agentSupportsProjectMcp);
+  for (const agent of agents) {
+    if (!agentSupportsProjectMcp(agent)) {
+      logger.warn(`Skipping ${agent.displayName}: project-scoped MCP configuration is not supported.`);
+    }
+  }
+
+  return supported;
 }
 
 function currentManagedMcpRows(db: Database.Database): ManagedMcpRow[] {
@@ -141,8 +161,8 @@ function upsertMcpInstallation(
   `).get(config.name, scope, projectPath) as { assigned_agents: string } | undefined;
 
   const assignedAgents = existing
-    ? mergeAssignment(existing.assigned_agents, targetAgent, agentNames)
-    : assignmentFor(targetAgent, agentNames);
+    ? mergeAssignment(existing.assigned_agents, targetAgent, agentNames, scope)
+    : assignmentFor(targetAgent, agentNames, scope);
 
   db.prepare(`
     INSERT INTO mcp_installations
@@ -176,9 +196,10 @@ function updateMcpAssignment(
   db: Database.Database,
   row: ManagedMcpRow,
   targetAgent: TargetAgent,
-  agentNames: AgentType[]
+  agentNames: AgentType[],
+  scope: InstallScope
 ): void {
-  const assignedAgents = mergeAssignment(row.assigned_agents, targetAgent, agentNames);
+  const assignedAgents = mergeAssignment(row.assigned_agents, targetAgent, agentNames, scope);
   db.prepare('UPDATE mcp_installations SET assigned_agents = ?, updated_at = ? WHERE id = ?')
     .run(assignedAgents, new Date().toISOString(), row.id);
 }
@@ -190,7 +211,7 @@ export async function installMcpService(name: string, options: McpInstallOptions
   const targetAgent = options.agent || 'all';
   const config = await getMcpConfig(name);
   const env = await promptForMcpEnv(config);
-  const agentsToInstall = await resolveAdapters(targetAgent);
+  const agentsToInstall = filterAgentsForMcpScope(await resolveAdapters(targetAgent), scope);
 
   if (agentsToInstall.length === 0) {
     logger.warn('No target agents found for MCP deployment.');
@@ -241,7 +262,7 @@ export async function removeMcpService(
   scope: InstallScope = 'global'
 ): Promise<void> {
   const db = await getDb();
-  const agentsToRemove = await resolveAdapters(targetAgent as TargetAgent);
+  const agentsToRemove = filterAgentsForMcpScope(await resolveAdapters(targetAgent as TargetAgent), scope);
 
   if (agentsToRemove.length === 0) {
     logger.warn('No target agents found for MCP removal.');
@@ -270,7 +291,7 @@ export async function removeMcpService(
   } else {
     const removedAgentNames = agentsToRemove.map((agent) => agent.name);
     const nextAssignment = row.assigned_agents === 'all'
-      ? JSON.stringify((await detectAgents())
+      ? JSON.stringify(filterAgentsForMcpScope(await detectAgents(), scope)
         .map((agent) => agent.name)
         .filter((agentName) => !removedAgentNames.includes(agentName)))
       : removeAssignment(row.assigned_agents, targetAgent as TargetAgent, removedAgentNames);
@@ -299,7 +320,7 @@ export async function syncMcpServices(
     return;
   }
 
-  const agents = await resolveAdapters(targetAgent);
+  const agents = filterAgentsForMcpScope(await resolveAdapters(targetAgent), scope);
   if (agents.length === 0) {
     logger.warn('No target agents found for MCP sync.');
     return;
@@ -319,7 +340,7 @@ export async function syncMcpServices(
       }
     }
 
-    updateMcpAssignment(db, row, targetAgent, agents.map((agent) => agent.name));
+    updateMcpAssignment(db, row, targetAgent, agents.map((agent) => agent.name), scope);
   }
 
   logger.success(`Synced ${rows.length} MCP service(s) to ${agents.length} agent(s) (${scope})`);

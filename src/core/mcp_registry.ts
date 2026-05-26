@@ -100,6 +100,41 @@ export async function getMcpConfig(name: string): Promise<McpRegistryEntry> {
   };
 }
 
+function escapeRegex(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+function extractTomlSection(content: string, sectionName: string): string | null {
+  const escaped = escapeRegex(sectionName);
+  const match = content.match(new RegExp(`(?:^|\\r?\\n)\\[${escaped}\\]\\s*\\r?\\n([\\s\\S]*?)(?=\\r?\\n\\[|$)`));
+  return match?.[1] ?? null;
+}
+
+function extractTomlStringAssignment(section: string | null, key: string): string | null {
+  if (!section) return null;
+  const escaped = escapeRegex(key);
+  const match = section.match(new RegExp(`^\\s*${escaped}\\s*=\\s*["']([^"']+)["']`, 'm'));
+  return match?.[1] ?? null;
+}
+
+function extractFirstTomlKey(section: string | null): string | null {
+  if (!section) return null;
+  const match = section.match(/^\s*(?:"([^"]+)"|'([^']+)'|([A-Za-z0-9_-]+))\s*=/m);
+  return match?.[1] || match?.[2] || match?.[3] || null;
+}
+
+export function parsePythonProjectMetadata(
+  pyprojectContent: string,
+  fallbackName: string
+): { name: string; scriptName: string } {
+  const projectSection = extractTomlSection(pyprojectContent, 'project');
+  const scriptsSection = extractTomlSection(pyprojectContent, 'project.scripts');
+  const name = extractTomlStringAssignment(projectSection, 'name') || fallbackName;
+  const scriptName = extractFirstTomlKey(scriptsSection) || name;
+
+  return { name, scriptName };
+}
+
 async function buildMcpFromSource(source: string): Promise<McpRegistryEntry | null> {
   const { parseSourceString } = await import('../parsers/index.js');
   const { cloneOrPull } = await import('../utils/git.js');
@@ -247,19 +282,7 @@ async function buildMcpFromSource(source: string): Promise<McpRegistryEntry | nu
       const fs = await import('node:fs/promises');
       const pyprojectContent = await fs.readFile(pyprojectPath, 'utf-8');
       
-      let mcpName = repoName;
-      const nameMatch = pyprojectContent.match(/^name\s*=\s*["']([^"']+)["']/m) || pyprojectContent.match(/\[project\][\s\S]*?^name\s*=\s*["']([^"']+)["']/m);
-      if (nameMatch) mcpName = nameMatch[1];
-      
-      // Look for scripts in [project.scripts]
-      let scriptName = mcpName;
-      const scriptsMatch = pyprojectContent.match(/\[project\.scripts\]([\s\S]*?)(?:^\[|$)/m);
-      if (scriptsMatch) {
-        const firstScriptMatch = scriptsMatch[1].match(/^\s*([^=\s]+)\s*=/m);
-        if (firstScriptMatch) {
-          scriptName = firstScriptMatch[1];
-        }
-      }
+      const { name: mcpName, scriptName } = parsePythonProjectMetadata(pyprojectContent, repoName);
 
       spinner.succeed(chalk.green(`Successfully setup custom Python MCP: ${mcpName}`));
       return {
