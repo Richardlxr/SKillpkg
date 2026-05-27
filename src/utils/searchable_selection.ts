@@ -19,6 +19,16 @@ export interface SearchableSelectionOptions<T extends string> {
   includeSelectAll?: boolean;
 }
 
+export interface SearchableSingleSelectionOptions<T extends string> {
+  choices: SearchableSelectionChoice<T>[];
+  itemLabel: string;
+  queryName: string;
+  selectionName: string;
+  searchMessage?: (total: number) => string;
+  selectMessage?: (matched: number, total: number, query: string) => string;
+  noMatchesMessage?: (query: string) => string;
+}
+
 export async function promptForSearchableSelection<T extends string>(
   options: SearchableSelectionOptions<T>
 ): Promise<T[]> {
@@ -58,10 +68,10 @@ export async function promptForSearchableSelection<T extends string>(
       type: 'checkbox',
       name: options.selectionName,
       message: options.selectMessage
-        ? options.selectMessage(filteredChoices.length, options.choices.length, query)
-        : query
+        ? withCheckboxHint(options.selectMessage(filteredChoices.length, options.choices.length, query))
+        : withCheckboxHint(query
           ? `Found ${filteredChoices.length} of ${options.choices.length} ${options.itemLabel} matching "${query}". Select which ones to install:`
-          : `Found ${options.choices.length} ${options.itemLabel}. Select which ones to install:`,
+          : `Found ${options.choices.length} ${options.itemLabel}. Select which ones to install:`),
       choices: checkboxChoices,
       pageSize: Math.min(20, Math.max(checkboxChoices.length, 5)),
       validate: (ans: unknown) => Array.isArray(ans) && ans.length > 0
@@ -75,6 +85,45 @@ export async function promptForSearchableSelection<T extends string>(
     }
 
     return selected.filter((value): value is T => value !== SELECT_ALL_CHOICE_VALUE);
+  }
+}
+
+export async function promptForSearchableSingleSelection<T extends string>(
+  options: SearchableSingleSelectionOptions<T>
+): Promise<T> {
+  const { default: inquirer } = await import('inquirer');
+
+  while (true) {
+    const searchAnswer = await inquirer.prompt<Record<string, string | undefined>>([{
+      type: 'input',
+      name: options.queryName,
+      message: options.searchMessage
+        ? options.searchMessage(options.choices.length)
+        : `Search ${options.itemLabel} (${options.choices.length} found, leave blank for all):`,
+    }]);
+    const query = (searchAnswer[options.queryName] || '').trim();
+    const filteredChoices = filterSearchableChoices(options.choices, query);
+
+    if (filteredChoices.length === 0) {
+      logger.warn(options.noMatchesMessage
+        ? options.noMatchesMessage(query)
+        : `No ${options.itemLabel} matched "${query}". Try another keyword or leave blank to show all.`);
+      continue;
+    }
+
+    const answer = await inquirer.prompt<Record<string, T>>([{
+      type: 'list',
+      name: options.selectionName,
+      message: options.selectMessage
+        ? options.selectMessage(filteredChoices.length, options.choices.length, query)
+        : query
+          ? `Found ${filteredChoices.length} of ${options.choices.length} ${options.itemLabel} matching "${query}". Select one:`
+          : `Found ${options.choices.length} ${options.itemLabel}. Select one:`,
+      choices: filteredChoices.map(({ name, value }) => ({ name, value })),
+      pageSize: Math.min(20, Math.max(filteredChoices.length, 5)),
+    }]);
+
+    return answer[options.selectionName];
   }
 }
 
@@ -93,4 +142,10 @@ export function filterSearchableChoices<T extends string>(
     const searchable = choice.searchable.toLowerCase();
     return terms.every((term) => searchable.includes(term));
   });
+}
+
+export function withCheckboxHint(message: string): string {
+  return message.includes('Use Space')
+    ? message
+    : `${message} Use Space to select, Enter to confirm.`;
 }

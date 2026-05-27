@@ -138,6 +138,10 @@ skm install
 skm agents sync --scope project --agent claude-code
 ```
 
+### Interactive Selection
+
+When a command can select multiple items, `skm` uses checkbox prompts: press `Space` to toggle items and `Enter` to confirm. Multi-select prompts include an `All` option when more than one item is visible. Large choice sets, such as multi-skill repositories, MCP monorepos, and assignable skills/MCP services, first ask for a search term so you can narrow by name, path, source, or scope before selecting.
+
 ### Choose Git Tracking for Project Skills
 
 Project-scoped installs can be local-only or committed for a team. Configure the default once:
