@@ -1,4 +1,5 @@
 import type { McpRegistryEntry } from '../types/index.js';
+import { looksLikeMcpAppName, toMcpServerName } from '../utils/mcp_names.js';
 
 /**
  * Built-in registry of known MCP servers.
@@ -68,6 +69,24 @@ export async function getMcpConfig(name: string): Promise<McpRegistryEntry> {
     return MCP_REGISTRY[pkgName];
   }
 
+  if (isRemoteMcpEndpoint(name)) {
+    return {
+      name: nameFromRemoteMcpUrl(name),
+      type: remoteMcpTransport(name) || 'http',
+      url: name,
+      command: '',
+      args: [],
+      envKeys: [],
+    };
+  }
+
+  if (looksLikeMcpAppPackageName(pkgName)) {
+    throw new Error(
+      `MCP package '${pkgName}' appears to be an MCP App/HTTP server. ` +
+      `skm currently configures stdio MCP clients only. Use a stdio MCP package or server subdirectory instead.`
+    );
+  }
+
   const isScopedNpmPackage = pkgName.startsWith('@') && pkgName.split('/').length === 2;
 
   // If it's a URL or github shorthand, attempt to build from source.
@@ -93,11 +112,108 @@ export async function getMcpConfig(name: string): Promise<McpRegistryEntry> {
   }
 
   return {
-    name: pkgName,
+    name: toMcpServerName(pkgName),
     command: 'npx',
     args: ['-y', name],
     envKeys: []
   };
+}
+
+export function looksLikeMcpAppPackageName(name: string): boolean {
+  return looksLikeMcpAppName(name);
+}
+
+export function isRemoteMcpEndpoint(source: string): boolean {
+  return remoteMcpTransport(source) !== null;
+}
+
+export function remoteMcpTransport(source: string): 'http' | 'sse' | null {
+  try {
+    const url = new URL(source);
+    if (!['http:', 'https:'].includes(url.protocol)) return null;
+    if (isLikelyGitHostUrl(url)) return null;
+
+    const path = url.pathname.replace(/\/+$/, '').toLowerCase();
+    if (path === '/sse' || path.endsWith('/sse')) return 'sse';
+    if (path === '/mcp' || path.endsWith('/mcp')) return 'http';
+    return 'http';
+  } catch {
+    return null;
+  }
+}
+
+function isLikelyGitHostUrl(url: URL): boolean {
+  return (
+    ['github.com', 'gitlab.com', 'bitbucket.org'].includes(url.hostname.toLowerCase()) ||
+    url.pathname.endsWith('.git')
+  );
+}
+
+function nameFromRemoteMcpUrl(source: string): string {
+  const url = new URL(source);
+  const host = url.hostname.replace(/^mcp\./i, '');
+  const path = url.pathname
+    .replace(/\/+$/, '')
+    .replace(/^\/+/, '')
+    .replace(/\/(?:mcp|sse)$/i, '')
+    .replace(/^(?:mcp|sse)$/i, '');
+  return toMcpServerName(path ? `${host}-${path}` : host);
+}
+
+function escapeRegex(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+function extractTomlSection(content: string, sectionName: string): string | null {
+  const escaped = escapeRegex(sectionName);
+  const match = content.match(new RegExp(`(?:^|\\r?\\n)\\[${escaped}\\]\\s*\\r?\\n([\\s\\S]*?)(?=\\r?\\n\\[|$)`));
+  return match?.[1] ?? null;
+}
+
+function extractTomlStringAssignment(section: string | null, key: string): string | null {
+  if (!section) return null;
+  const escaped = escapeRegex(key);
+  const match = section.match(new RegExp(`^\\s*${escaped}\\s*=\\s*["']([^"']+)["']`, 'm'));
+  return match?.[1] ?? null;
+}
+
+function extractFirstTomlKey(section: string | null): string | null {
+  if (!section) return null;
+  const match = section.match(/^\s*(?:"([^"]+)"|'([^']+)'|([A-Za-z0-9_-]+))\s*=/m);
+  return match?.[1] || match?.[2] || match?.[3] || null;
+}
+
+export function parsePythonProjectMetadata(
+  pyprojectContent: string,
+  fallbackName: string
+): { name: string; scriptName: string } {
+  const projectSection = extractTomlSection(pyprojectContent, 'project');
+  const scriptsSection = extractTomlSection(pyprojectContent, 'project.scripts');
+  const rawName = extractTomlStringAssignment(projectSection, 'name') || fallbackName;
+  const name = toMcpServerName(rawName);
+  const scriptName = extractFirstTomlKey(scriptsSection) || rawName;
+
+  return { name, scriptName };
+}
+
+type PackageJsonLike = {
+  name?: string;
+  description?: string;
+  dependencies?: Record<string, unknown>;
+  devDependencies?: Record<string, unknown>;
+};
+
+export function isUnsupportedMcpAppPackage(pkg: PackageJsonLike | null | undefined): boolean {
+  if (!pkg) return false;
+  const dependencies = {
+    ...(pkg.dependencies || {}),
+    ...(pkg.devDependencies || {}),
+  };
+  return (
+    '@modelcontextprotocol/ext-apps' in dependencies ||
+    looksLikeMcpAppPackageName(pkg.name || '') ||
+    /\bMCP App\b/i.test(pkg.description || '')
+  );
 }
 
 async function buildMcpFromSource(source: string): Promise<McpRegistryEntry | null> {
@@ -144,6 +260,7 @@ async function buildMcpFromSource(source: string): Promise<McpRegistryEntry | nu
         if (await pathExists(join(subPath, 'package.json'))) {
           // Verify it's a valid application (has bin or main, or index.js)
           const pkg = await readJsonFile<any>(join(subPath, 'package.json'));
+          if (isUnsupportedMcpAppPackage(pkg)) continue;
           const hasEntryPoint = pkg?.bin || pkg?.main || await pathExists(join(subPath, 'index.js')) || await pathExists(join(subPath, 'dist', 'index.js')) || await pathExists(join(subPath, 'src', 'index.js'));
           if (hasEntryPoint) {
             projects.push({ path: subPath, name: dir.name, type: 'Node.js' });
@@ -189,10 +306,16 @@ async function buildMcpFromSource(source: string): Promise<McpRegistryEntry | nu
     }
 
     if (await pathExists(pkgJsonPath)) {
+      const pkg: any = await readJsonFile(pkgJsonPath);
+      if (isUnsupportedMcpAppPackage(pkg)) {
+        throw new Error(
+          `Node package '${pkg?.name || repoName}' appears to be an MCP App/HTTP server. ` +
+          `skm currently configures stdio MCP clients only. Choose a stdio server such as mcp-tool-server.`
+        );
+      }
+
       spinner.text = chalk.blue('📦 Installing Node.js dependencies...');
       await execAsync('npm install --ignore-scripts', { cwd: workDir });
-
-      const pkg: any = await readJsonFile(pkgJsonPath);
       
       // Try common build/setup scripts
       const buildScripts = ['build', 'compile', 'prepare', 'prepack', 'prestart'];
@@ -229,7 +352,7 @@ async function buildMcpFromSource(source: string): Promise<McpRegistryEntry | nu
 
       spinner.succeed(chalk.green(`Successfully built custom Node.js MCP: ${pkg.name || repoName}`));
       return {
-        name: pkg.name || repoName,
+        name: toMcpServerName(pkg.name || repoName),
         command: 'node',
         args: [absoluteEntryPoint],
         envKeys: [] // Ask user later or default to empty
@@ -247,19 +370,7 @@ async function buildMcpFromSource(source: string): Promise<McpRegistryEntry | nu
       const fs = await import('node:fs/promises');
       const pyprojectContent = await fs.readFile(pyprojectPath, 'utf-8');
       
-      let mcpName = repoName;
-      const nameMatch = pyprojectContent.match(/^name\s*=\s*["']([^"']+)["']/m) || pyprojectContent.match(/\[project\][\s\S]*?^name\s*=\s*["']([^"']+)["']/m);
-      if (nameMatch) mcpName = nameMatch[1];
-      
-      // Look for scripts in [project.scripts]
-      let scriptName = mcpName;
-      const scriptsMatch = pyprojectContent.match(/\[project\.scripts\]([\s\S]*?)(?:^\[|$)/m);
-      if (scriptsMatch) {
-        const firstScriptMatch = scriptsMatch[1].match(/^\s*([^=\s]+)\s*=/m);
-        if (firstScriptMatch) {
-          scriptName = firstScriptMatch[1];
-        }
-      }
+      const { name: mcpName, scriptName } = parsePythonProjectMetadata(pyprojectContent, repoName);
 
       spinner.succeed(chalk.green(`Successfully setup custom Python MCP: ${mcpName}`));
       return {
@@ -284,7 +395,7 @@ async function buildMcpFromSource(source: string): Promise<McpRegistryEntry | nu
 
       spinner.succeed(chalk.green(`Successfully built custom Go MCP: ${repoName}`));
       return {
-        name: repoName,
+        name: toMcpServerName(repoName),
         command: absoluteEntryPoint,
         args: [],
         envKeys: []

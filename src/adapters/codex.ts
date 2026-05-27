@@ -7,6 +7,7 @@ import { AGENT_PATHS } from '../utils/platform.js';
 import { listSubdirs, pathExists, readFileOrNull, writeFileSafe } from '../utils/fs.js';
 import { parseSkillMd } from '../parsers/index.js';
 import { logger } from '../utils/logger.js';
+import { mcpServerNameCandidates, toMcpServerName } from '../utils/mcp_names.js';
 import { BaseAdapter } from './base.js';
 
 export class CodexAdapter extends BaseAdapter {
@@ -50,9 +51,10 @@ export class CodexAdapter extends BaseAdapter {
     if (!configPath) return;
 
     const existing = await readFileOrNull(configPath);
-    const next = upsertCodexMcpBlock(existing || '', mcp, env || {});
+    const serverName = this.mcpServerName(mcp.name);
+    const next = upsertCodexMcpBlock(existing || '', { ...mcp, name: serverName }, env || {}, mcp.name);
     await writeFileSafe(configPath, next);
-    logger.agent(this.displayName, `Configured MCP: ${mcp.name}`);
+    logger.agent(this.displayName, `Configured MCP: ${serverName}`);
   }
 
   async removeMCP(mcpName: string, scope: InstallScope = 'global'): Promise<void> {
@@ -65,7 +67,7 @@ export class CodexAdapter extends BaseAdapter {
     const next = removeCodexMcpBlock(existing, mcpName);
     if (next !== existing) {
       await writeFileSafe(configPath, next);
-      logger.agent(this.displayName, `Removed MCP: ${mcpName}`);
+      logger.agent(this.displayName, `Removed MCP: ${this.mcpServerName(mcpName)}`);
     }
   }
 
@@ -121,8 +123,8 @@ async function listInstalledCodexSkills(skillsDir: string): Promise<InstalledSki
   return results;
 }
 
-function upsertCodexMcpBlock(content: string, mcp: McpRegistryEntry, env: Record<string, string>): string {
-  const cleaned = removeCodexMcpBlock(content, mcp.name).trimEnd();
+function upsertCodexMcpBlock(content: string, mcp: McpRegistryEntry, env: Record<string, string>, originalName: string = mcp.name): string {
+  const cleaned = removeCodexMcpBlock(content, originalName).trimEnd();
   const block = buildCodexMcpBlock(mcp, env);
   return `${cleaned}${cleaned ? '\n\n' : ''}${block}\n`;
 }
@@ -131,11 +133,13 @@ function removeCodexMcpBlock(content: string, mcpName: string): string {
   const lines = content.split('\n');
   const kept: string[] = [];
   let skipping = false;
+  const candidates = mcpServerNameCandidates(mcpName);
+  const targetName = toMcpServerName(mcpName);
 
   for (const line of lines) {
     const tableName = parseCodexMcpTableName(line);
     if (tableName) {
-      skipping = tableName === mcpName;
+      skipping = candidates.includes(tableName) || toMcpServerName(tableName) === targetName;
     } else if (skipping && line.trim().startsWith('[')) {
       skipping = false;
     }
@@ -151,10 +155,18 @@ function removeCodexMcpBlock(content: string, mcpName: string): string {
 function buildCodexMcpBlock(mcp: McpRegistryEntry, env: Record<string, string>): string {
   const lines = [
     `[mcp_servers.${tomlKey(mcp.name)}]`,
-    `command = ${tomlString(mcp.command)}`,
-    `args = ${tomlArray(mcp.args || [])}`,
     'enabled = true',
   ];
+
+  if ((mcp.type === 'http' || mcp.type === 'sse') && mcp.url) {
+    lines.push(`url = ${tomlString(mcp.url)}`);
+    return lines.join('\n');
+  }
+
+  lines.splice(1, 0,
+    `command = ${tomlString(mcp.command)}`,
+    `args = ${tomlArray(mcp.args || [])}`,
+  );
 
   if (Object.keys(env).length > 0) {
     lines.push(`env = ${tomlInlineTable(env)}`);

@@ -11,6 +11,7 @@ import type Database from 'better-sqlite3';
 import { getDb, genId } from '../db/index.js';
 import { detectAgents, getAllAdapters, resolveAdapters } from '../adapters/index.js';
 import { logger } from '../utils/logger.js';
+import { looksLikeMcpAppName, toMcpServerName } from '../utils/mcp_names.js';
 import type { AgentAdapter, AgentType, DiscoveredMcp, InstallScope, McpRegistryEntry } from '../types/index.js';
 
 const execAsync = promisify(exec);
@@ -68,8 +69,20 @@ function parseJsonValue<T>(value: string | null | undefined, fallback: T): T {
 }
 
 function rowToConfig(row: ManagedMcpRow): McpRegistryEntry {
+  if (row.type === 'http' || row.type === 'sse') {
+    return {
+      name: row.name,
+      type: row.type,
+      url: row.command,
+      command: '',
+      args: [],
+      envKeys: Object.keys(parseJsonValue<Record<string, string>>(row.env, {})),
+    };
+  }
+
   return {
     name: row.name,
+    type: 'stdio',
     command: row.command,
     args: parseJsonValue<string[]>(row.args, []),
     envKeys: Object.keys(parseJsonValue<Record<string, string>>(row.env, {})),
@@ -80,12 +93,31 @@ function rowToEnv(row: ManagedMcpRow): Record<string, string> {
   return parseJsonValue<Record<string, string>>(row.env, {});
 }
 
-function assignmentFor(targetAgent: TargetAgent, agentNames: AgentType[]): string {
-  return targetAgent === 'all' ? 'all' : JSON.stringify(agentNames);
+function isUnsupportedManagedMcpRow(row: ManagedMcpRow): boolean {
+  if (row.type === 'http' || row.type === 'sse') return false;
+
+  const references = [
+    row.name,
+    row.source,
+    row.command,
+    ...parseJsonValue<string[]>(row.args, []),
+  ];
+  return references.some((value) => looksLikeMcpAppName(value));
 }
 
-function mergeAssignment(existing: string | null | undefined, targetAgent: TargetAgent, agentNames: AgentType[]): string {
-  if (targetAgent === 'all') return 'all';
+function assignmentFor(targetAgent: TargetAgent, agentNames: AgentType[], scope: InstallScope): string {
+  if (targetAgent === 'all' && scope !== 'project') return 'all';
+  return JSON.stringify(agentNames);
+}
+
+function mergeAssignment(
+  existing: string | null | undefined,
+  targetAgent: TargetAgent,
+  agentNames: AgentType[],
+  scope: InstallScope
+): string {
+  if (targetAgent === 'all' && scope !== 'project') return 'all';
+  if (targetAgent === 'all') return JSON.stringify(agentNames);
   if (!existing || existing === 'all') return JSON.stringify(agentNames);
 
   const parsed = parseJsonValue<string[]>(existing, []);
@@ -113,6 +145,19 @@ function agentSupportsProjectMcp(agent: AgentAdapter): boolean {
   return ['antigravity-cli', 'claude-code', 'codex', 'cursor'].includes(agent.name);
 }
 
+function filterAgentsForMcpScope(agents: AgentAdapter[], scope: InstallScope): AgentAdapter[] {
+  if (scope !== 'project') return agents;
+
+  const supported = agents.filter(agentSupportsProjectMcp);
+  for (const agent of agents) {
+    if (!agentSupportsProjectMcp(agent)) {
+      logger.warn(`Skipping ${agent.displayName}: project-scoped MCP configuration is not supported.`);
+    }
+  }
+
+  return supported;
+}
+
 function currentManagedMcpRows(db: Database.Database): ManagedMcpRow[] {
   return db.prepare(`
     SELECT *
@@ -134,15 +179,45 @@ function upsertMcpInstallation(
 ): void {
   const now = new Date().toISOString();
   const projectPath = projectPathForScope(scope);
+  const type = config.type || (config.url ? 'http' : 'stdio');
+  const command = type === 'http' || type === 'sse' ? (config.url || config.command) : config.command;
   const existing = db.prepare(`
-    SELECT assigned_agents
+    SELECT id, assigned_agents
     FROM mcp_installations
-    WHERE name = ? AND scope = ? AND project_path = ?
-  `).get(config.name, scope, projectPath) as { assigned_agents: string } | undefined;
+    WHERE scope = ? AND project_path = ? AND (name = ? OR source = ?)
+    ORDER BY CASE WHEN name = ? THEN 0 ELSE 1 END
+    LIMIT 1
+  `).get(scope, projectPath, config.name, source, config.name) as { id: string; assigned_agents: string } | undefined;
 
   const assignedAgents = existing
-    ? mergeAssignment(existing.assigned_agents, targetAgent, agentNames)
-    : assignmentFor(targetAgent, agentNames);
+    ? mergeAssignment(existing.assigned_agents, targetAgent, agentNames, scope)
+    : assignmentFor(targetAgent, agentNames, scope);
+
+  if (existing) {
+    db.prepare(`
+      UPDATE mcp_installations SET
+        name = ?,
+        source = ?,
+        type = ?,
+        command = ?,
+        args = ?,
+        env = ?,
+        assigned_agents = ?,
+        updated_at = ?
+      WHERE id = ?
+    `).run(
+      config.name,
+      source,
+      type,
+      command,
+      JSON.stringify(config.args || []),
+      JSON.stringify(env || {}),
+      assignedAgents,
+      now,
+      existing.id
+    );
+    return;
+  }
 
   db.prepare(`
     INSERT INTO mcp_installations
@@ -160,8 +235,8 @@ function upsertMcpInstallation(
     genId(),
     config.name,
     source,
-    'stdio',
-    config.command,
+    type,
+    command,
     JSON.stringify(config.args || []),
     JSON.stringify(env || {}),
     scope,
@@ -176,9 +251,10 @@ function updateMcpAssignment(
   db: Database.Database,
   row: ManagedMcpRow,
   targetAgent: TargetAgent,
-  agentNames: AgentType[]
+  agentNames: AgentType[],
+  scope: InstallScope
 ): void {
-  const assignedAgents = mergeAssignment(row.assigned_agents, targetAgent, agentNames);
+  const assignedAgents = mergeAssignment(row.assigned_agents, targetAgent, agentNames, scope);
   db.prepare('UPDATE mcp_installations SET assigned_agents = ?, updated_at = ? WHERE id = ?')
     .run(assignedAgents, new Date().toISOString(), row.id);
 }
@@ -190,7 +266,7 @@ export async function installMcpService(name: string, options: McpInstallOptions
   const targetAgent = options.agent || 'all';
   const config = await getMcpConfig(name);
   const env = await promptForMcpEnv(config);
-  const agentsToInstall = await resolveAdapters(targetAgent);
+  const agentsToInstall = filterAgentsForMcpScope(await resolveAdapters(targetAgent), scope);
 
   if (agentsToInstall.length === 0) {
     logger.warn('No target agents found for MCP deployment.');
@@ -241,27 +317,30 @@ export async function removeMcpService(
   scope: InstallScope = 'global'
 ): Promise<void> {
   const db = await getDb();
-  const agentsToRemove = await resolveAdapters(targetAgent as TargetAgent);
+  const agentsToRemove = filterAgentsForMcpScope(await resolveAdapters(targetAgent as TargetAgent), scope);
 
   if (agentsToRemove.length === 0) {
     logger.warn('No target agents found for MCP removal.');
     return;
   }
 
-  for (const agent of agentsToRemove) {
-    try {
-      await agent.removeMCP(name, scope);
-    } catch (e) {
-      logger.warn(`Failed to remove MCP from ${agent.displayName}: ${(e as Error).message}`);
-    }
-  }
-
   const projectPath = projectPathForScope(scope);
   const row = db.prepare(`
     SELECT *
     FROM mcp_installations
-    WHERE name = ? AND scope = ? AND project_path = ?
-  `).get(name, scope, projectPath) as ManagedMcpRow | undefined;
+    WHERE scope = ? AND project_path = ? AND (name = ? OR source = ? OR name = ?)
+    ORDER BY CASE WHEN name = ? THEN 0 ELSE 1 END
+    LIMIT 1
+  `).get(scope, projectPath, name, name, toMcpServerName(name), name) as ManagedMcpRow | undefined;
+  const configuredName = row?.name || toMcpServerName(name);
+
+  for (const agent of agentsToRemove) {
+    try {
+      await agent.removeMCP(configuredName, scope);
+    } catch (e) {
+      logger.warn(`Failed to remove MCP from ${agent.displayName}: ${(e as Error).message}`);
+    }
+  }
 
   if (!row) return;
 
@@ -270,7 +349,7 @@ export async function removeMcpService(
   } else {
     const removedAgentNames = agentsToRemove.map((agent) => agent.name);
     const nextAssignment = row.assigned_agents === 'all'
-      ? JSON.stringify((await detectAgents())
+      ? JSON.stringify(filterAgentsForMcpScope(await detectAgents(), scope)
         .map((agent) => agent.name)
         .filter((agentName) => !removedAgentNames.includes(agentName)))
       : removeAssignment(row.assigned_agents, targetAgent as TargetAgent, removedAgentNames);
@@ -299,14 +378,21 @@ export async function syncMcpServices(
     return;
   }
 
-  const agents = await resolveAdapters(targetAgent);
+  const agents = filterAgentsForMcpScope(await resolveAdapters(targetAgent), scope);
   if (agents.length === 0) {
     logger.warn('No target agents found for MCP sync.');
     return;
   }
 
   let synced = 0;
+  let skipped = 0;
   for (const row of rows) {
+    if (isUnsupportedManagedMcpRow(row)) {
+      logger.warn(`Skipping MCP "${row.name}": MCP App/HTTP servers cannot be synced as stdio servers.`);
+      skipped++;
+      continue;
+    }
+
     const config = rowToConfig(row);
     const env = rowToEnv(row);
 
@@ -319,10 +405,13 @@ export async function syncMcpServices(
       }
     }
 
-    updateMcpAssignment(db, row, targetAgent, agents.map((agent) => agent.name));
+    updateMcpAssignment(db, row, targetAgent, agents.map((agent) => agent.name), scope);
   }
 
-  logger.success(`Synced ${rows.length} MCP service(s) to ${agents.length} agent(s) (${scope})`);
+  logger.success(`Synced ${rows.length - skipped} MCP service(s) to ${agents.length} agent(s) (${scope})`);
+  if (skipped > 0) {
+    logger.warn(`Skipped ${skipped} unsupported MCP App/HTTP service(s). Remove them with skm mcp remove if they are no longer needed.`);
+  }
   logger.debug(`MCP config writes: ${synced}`);
 }
 
@@ -358,6 +447,11 @@ export async function promoteMcpService(
     }
 
     logger.error(`Project MCP "${name}" is not managed by skm`);
+    return;
+  }
+
+  if (isUnsupportedManagedMcpRow(row)) {
+    logger.error(`Project MCP "${row.name}" appears to be an MCP App/HTTP server and cannot be promoted as stdio.`);
     return;
   }
 
@@ -471,8 +565,8 @@ export async function checkMcpStatus(): Promise<void> {
   ]);
   const extraFromConfig = configMcps.filter((m) => !dbNames.has(m.name));
 
-  const allServices: { name: string; command: string }[] = [
-    ...managedRows.map((r) => ({ name: r.name, command: r.command })),
+  const allServices: { name: string; command: string; type?: string }[] = [
+    ...managedRows.map((r) => ({ name: r.name, command: r.command, type: r.type })),
     ...skillRows.map((r) => ({ name: r['name'] as string, command: r['command'] as string })),
     ...extraFromConfig.map((m) => ({ name: m.name, command: m.command })),
   ];
@@ -491,6 +585,11 @@ export async function checkMcpStatus(): Promise<void> {
   logger.blank();
 
   for (const svc of uniqueServices) {
+    if (svc.type === 'http' || svc.type === 'sse' || /^https?:\/\//i.test(svc.command)) {
+      console.log(`  ${svc.name.padEnd(25)} ${chalk.green('remote')}  ${chalk.gray(`(${svc.command})`)}`);
+      continue;
+    }
+
     let available = false;
     try {
       const checkCmd = process.platform === 'win32'

@@ -27,16 +27,24 @@ export class CursorAdapter extends BaseAdapter {
 
     const config = (await readJsonFile<Record<string, unknown>>(configPath)) || { mcpServers: {} };
     const mcpServers = (config['mcpServers'] as Record<string, unknown>) || {};
+    const serverName = this.mcpServerName(mcp.name);
 
-    mcpServers[mcp.name] = {
-      command: mcp.command,
-      args: mcp.args || [],
-      env: env || {},
-    };
+    this.removeMcpServerEntries(mcpServers, mcp.name);
+    mcpServers[serverName] = isRemoteMcp(mcp)
+      ? {
+        type: mcp.type,
+        url: mcp.url,
+      }
+      : {
+        type: 'stdio',
+        command: mcp.command,
+        args: mcp.args || [],
+        env: env || {},
+      };
 
     config['mcpServers'] = mcpServers;
     await writeJsonFile(configPath, config);
-    logger.agent(this.displayName, `Configured MCP: ${mcp.name}`);
+    logger.agent(this.displayName, `Configured MCP: ${serverName}`);
   }
 
   async removeMCP(mcpName: string, scope: InstallScope = 'global'): Promise<void> {
@@ -46,11 +54,10 @@ export class CursorAdapter extends BaseAdapter {
     const config = (await readJsonFile<Record<string, unknown>>(configPath)) || {};
     const mcpServers = (config['mcpServers'] as Record<string, unknown>) || {};
 
-    if (mcpName in mcpServers) {
-      delete mcpServers[mcpName];
+    if (this.removeMcpServerEntries(mcpServers, mcpName)) {
       config['mcpServers'] = mcpServers;
       await writeJsonFile(configPath, config);
-      logger.agent(this.displayName, `Removed MCP: ${mcpName}`);
+      logger.agent(this.displayName, `Removed MCP: ${this.mcpServerName(mcpName)}`);
     }
   }
 
@@ -60,4 +67,8 @@ export class CursorAdapter extends BaseAdapter {
       { path: AGENT_PATHS.cursor.mcpConfig('project') },
     ]);
   }
+}
+
+function isRemoteMcp(mcp: McpRegistryEntry): mcp is McpRegistryEntry & { type: 'http' | 'sse'; url: string } {
+  return (mcp.type === 'http' || mcp.type === 'sse') && Boolean(mcp.url);
 }

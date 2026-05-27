@@ -26,6 +26,7 @@ import { parseSkillMd } from '../parsers/index.js';
 import { logger } from '../utils/logger.js';
 import { isSymlinkInstallMode } from '../utils/install_mode.js';
 import { AGENT_PATHS } from '../utils/platform.js';
+import { mcpServerNameCandidates, toMcpServerName } from '../utils/mcp_names.js';
 
 /**
  * Abstract base class that provides common installation logic.
@@ -179,5 +180,24 @@ export abstract class BaseAdapter implements AgentAdapter {
       }
     }
     return Array.from(byName.values());
+  }
+
+  protected mcpServerName(name: string): string {
+    return toMcpServerName(name);
+  }
+
+  protected removeMcpServerEntries(
+    mcpServers: Record<string, unknown>,
+    name: string
+  ): boolean {
+    let removed = false;
+    const targetName = this.mcpServerName(name);
+    for (const key of Object.keys(mcpServers)) {
+      if (mcpServerNameCandidates(name).includes(key) || this.mcpServerName(key) === targetName) {
+        delete mcpServers[key];
+        removed = true;
+      }
+    }
+    return removed;
   }
 }
