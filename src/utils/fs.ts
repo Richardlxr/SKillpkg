@@ -2,7 +2,7 @@
  * File system helpers for cross-platform operations
  */
 import { mkdir, readFile, writeFile, rm, access, readdir, stat, cp, symlink, lstat, readlink } from 'node:fs/promises';
-import { join, dirname, relative, resolve } from 'node:path';
+import { join, dirname, relative, resolve, normalize, toNamespacedPath } from 'node:path';
 import { constants } from 'node:fs';
 
 /** Ensure a directory exists (recursive) */
@@ -92,7 +92,11 @@ export async function removePath(p: string): Promise<void> {
 /** Copy directory recursively */
 export async function copyDir(src: string, dest: string): Promise<void> {
   await ensureDir(dirname(dest));
-  await cp(src, dest, { recursive: true, force: true });
+  await cp(src, dest, { recursive: true, force: true, dereference: true });
+}
+
+export function directorySymlinkType(platform: NodeJS.Platform = process.platform): 'dir' | 'junction' {
+  return platform === 'win32' ? 'junction' : 'dir';
 }
 
 /** Create a symlink (falls back to copy on systems that disallow symlinks) */
@@ -103,7 +107,8 @@ export async function createSymlinkOrCopy(target: string, linkPath: string): Pro
   }
 
   try {
-    await symlink(target, linkPath, 'dir');
+    const linkTarget = directorySymlinkType() === 'junction' ? resolve(target) : target;
+    await symlink(linkTarget, linkPath, directorySymlinkType());
     return true;
   } catch {
     // Fallback to copy on systems that don't support symlinks
@@ -124,8 +129,7 @@ export async function ensureDirectorySymlink(linkPath: string, target: string): 
     }
 
     const currentTarget = await readlink(linkPath);
-    const resolvedCurrent = resolve(dirname(linkPath), currentTarget);
-    if (resolvedCurrent === resolve(target)) {
+    if (comparablePath(resolve(dirname(linkPath), currentTarget)) === comparablePath(target)) {
       return 'exists';
     }
 
@@ -133,9 +137,15 @@ export async function ensureDirectorySymlink(linkPath: string, target: string): 
   }
 
   await ensureDir(dirname(linkPath));
-  const relativeTarget = relative(dirname(linkPath), target) || '.';
-  await symlink(relativeTarget, linkPath, 'dir');
+  const linkTarget = directorySymlinkType() === 'junction'
+    ? resolve(target)
+    : relative(dirname(linkPath), target) || '.';
+  await symlink(linkTarget, linkPath, directorySymlinkType());
   return 'created';
+}
+
+function comparablePath(p: string): string {
+  return normalize(toNamespacedPath(resolve(p)));
 }
 
 /** List subdirectories in a directory */

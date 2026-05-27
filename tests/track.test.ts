@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { mkdir, mkdtemp, rm, symlink, writeFile } from 'node:fs/promises';
+import { lstat, mkdir, mkdtemp, rm, symlink, writeFile } from 'node:fs/promises';
 import { existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -91,6 +91,7 @@ describe('trackSkills', () => {
 
     await trackSkills('symlink-demo');
 
+    expect((await lstat(staleStoreDir)).isSymbolicLink()).toBe(false);
     expect(existsSync(join(staleStoreDir, 'SKILL.md'))).toBe(true);
     expect(existsSync(join(staleStoreDir, 'stale.txt'))).toBe(false);
     expect(existsSync(nativeLink)).toBe(false);
