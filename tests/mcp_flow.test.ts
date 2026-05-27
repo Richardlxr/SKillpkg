@@ -163,6 +163,37 @@ describe('MCP install and scope flow', () => {
     expect((await getMcpRow('shared-mcp', 'global', '')).assigned_agents).toBe('all');
   });
 
+  it('skips legacy MCP App rows during sync instead of re-adding them as stdio servers', async () => {
+    const { syncMcpServices } = await import('../src/core/mcp.js');
+    const codex = fakeAgent('codex', 'Codex (OpenAI)');
+    mocks.resolveAdapters.mockResolvedValue([codex]);
+    await seedMcp({
+      name: 'drawio-mcp',
+      source: 'https://github.com/jgraph/drawio-mcp.git',
+      scope: 'project',
+      projectPath: projectA,
+      assignedAgents: JSON.stringify(['codex']),
+      args: ['mcp-tool-server/src/index.js'],
+    });
+    await seedMcp({
+      name: '@drawio/mcp-app',
+      source: 'https://github.com/jgraph/drawio-mcp.git#mcp-app-server',
+      scope: 'project',
+      projectPath: projectA,
+      assignedAgents: JSON.stringify(['codex']),
+      args: ['mcp-app-server/src/index.js'],
+    });
+
+    await syncMcpServices({ scope: 'project', agent: 'codex' });
+
+    expect(codex.configureMCP).toHaveBeenCalledTimes(1);
+    expect(codex.configureMCP).toHaveBeenCalledWith(
+      expect.objectContaining({ name: 'drawio-mcp', args: ['mcp-tool-server/src/index.js'] }),
+      {},
+      'project'
+    );
+  });
+
   it('removes project MCP assignments without deleting matching global records', async () => {
     const { removeMcpService } = await import('../src/core/mcp.js');
     const claude = fakeAgent('claude-code', 'Claude Code');

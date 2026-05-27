@@ -1,4 +1,5 @@
 import type { McpRegistryEntry } from '../types/index.js';
+import { looksLikeMcpAppName, toMcpServerName } from '../utils/mcp_names.js';
 
 /**
  * Built-in registry of known MCP servers.
@@ -68,6 +69,24 @@ export async function getMcpConfig(name: string): Promise<McpRegistryEntry> {
     return MCP_REGISTRY[pkgName];
   }
 
+  if (isRemoteMcpEndpoint(name)) {
+    return {
+      name: nameFromRemoteMcpUrl(name),
+      type: 'http',
+      url: name,
+      command: '',
+      args: [],
+      envKeys: [],
+    };
+  }
+
+  if (looksLikeMcpAppPackageName(pkgName)) {
+    throw new Error(
+      `MCP package '${pkgName}' appears to be an MCP App/HTTP server. ` +
+      `skm currently configures stdio MCP clients only. Use a stdio MCP package or server subdirectory instead.`
+    );
+  }
+
   const isScopedNpmPackage = pkgName.startsWith('@') && pkgName.split('/').length === 2;
 
   // If it's a URL or github shorthand, attempt to build from source.
@@ -93,11 +112,53 @@ export async function getMcpConfig(name: string): Promise<McpRegistryEntry> {
   }
 
   return {
-    name: pkgName,
+    name: toMcpServerName(pkgName),
     command: 'npx',
     args: ['-y', name],
     envKeys: []
   };
+}
+
+export function looksLikeMcpAppPackageName(name: string): boolean {
+  return looksLikeMcpAppName(name);
+}
+
+export function isRemoteMcpEndpoint(source: string): boolean {
+  try {
+    const url = new URL(source);
+    if (!['http:', 'https:'].includes(url.protocol)) return false;
+    if (isLikelyGitHostUrl(url)) return false;
+
+    const path = url.pathname.replace(/\/+$/, '').toLowerCase();
+    return (
+      path === '/mcp' ||
+      path.endsWith('/mcp') ||
+      path === '/sse' ||
+      path.endsWith('/sse') ||
+      url.hostname === 'localhost' ||
+      url.hostname === '127.0.0.1'
+    );
+  } catch {
+    return false;
+  }
+}
+
+function isLikelyGitHostUrl(url: URL): boolean {
+  return (
+    ['github.com', 'gitlab.com', 'bitbucket.org'].includes(url.hostname.toLowerCase()) ||
+    url.pathname.endsWith('.git')
+  );
+}
+
+function nameFromRemoteMcpUrl(source: string): string {
+  const url = new URL(source);
+  const host = url.hostname.replace(/^mcp\./i, '');
+  const path = url.pathname
+    .replace(/\/+$/, '')
+    .replace(/^\/+/, '')
+    .replace(/\/(?:mcp|sse)$/i, '')
+    .replace(/^(?:mcp|sse)$/i, '');
+  return toMcpServerName(path ? `${host}-${path}` : host);
 }
 
 function escapeRegex(value: string): string {
@@ -129,10 +190,31 @@ export function parsePythonProjectMetadata(
 ): { name: string; scriptName: string } {
   const projectSection = extractTomlSection(pyprojectContent, 'project');
   const scriptsSection = extractTomlSection(pyprojectContent, 'project.scripts');
-  const name = extractTomlStringAssignment(projectSection, 'name') || fallbackName;
-  const scriptName = extractFirstTomlKey(scriptsSection) || name;
+  const rawName = extractTomlStringAssignment(projectSection, 'name') || fallbackName;
+  const name = toMcpServerName(rawName);
+  const scriptName = extractFirstTomlKey(scriptsSection) || rawName;
 
   return { name, scriptName };
+}
+
+type PackageJsonLike = {
+  name?: string;
+  description?: string;
+  dependencies?: Record<string, unknown>;
+  devDependencies?: Record<string, unknown>;
+};
+
+export function isUnsupportedMcpAppPackage(pkg: PackageJsonLike | null | undefined): boolean {
+  if (!pkg) return false;
+  const dependencies = {
+    ...(pkg.dependencies || {}),
+    ...(pkg.devDependencies || {}),
+  };
+  return (
+    '@modelcontextprotocol/ext-apps' in dependencies ||
+    looksLikeMcpAppPackageName(pkg.name || '') ||
+    /\bMCP App\b/i.test(pkg.description || '')
+  );
 }
 
 async function buildMcpFromSource(source: string): Promise<McpRegistryEntry | null> {
@@ -179,6 +261,7 @@ async function buildMcpFromSource(source: string): Promise<McpRegistryEntry | nu
         if (await pathExists(join(subPath, 'package.json'))) {
           // Verify it's a valid application (has bin or main, or index.js)
           const pkg = await readJsonFile<any>(join(subPath, 'package.json'));
+          if (isUnsupportedMcpAppPackage(pkg)) continue;
           const hasEntryPoint = pkg?.bin || pkg?.main || await pathExists(join(subPath, 'index.js')) || await pathExists(join(subPath, 'dist', 'index.js')) || await pathExists(join(subPath, 'src', 'index.js'));
           if (hasEntryPoint) {
             projects.push({ path: subPath, name: dir.name, type: 'Node.js' });
@@ -224,10 +307,16 @@ async function buildMcpFromSource(source: string): Promise<McpRegistryEntry | nu
     }
 
     if (await pathExists(pkgJsonPath)) {
+      const pkg: any = await readJsonFile(pkgJsonPath);
+      if (isUnsupportedMcpAppPackage(pkg)) {
+        throw new Error(
+          `Node package '${pkg?.name || repoName}' appears to be an MCP App/HTTP server. ` +
+          `skm currently configures stdio MCP clients only. Choose a stdio server such as mcp-tool-server.`
+        );
+      }
+
       spinner.text = chalk.blue('📦 Installing Node.js dependencies...');
       await execAsync('npm install --ignore-scripts', { cwd: workDir });
-
-      const pkg: any = await readJsonFile(pkgJsonPath);
       
       // Try common build/setup scripts
       const buildScripts = ['build', 'compile', 'prepare', 'prepack', 'prestart'];
@@ -264,7 +353,7 @@ async function buildMcpFromSource(source: string): Promise<McpRegistryEntry | nu
 
       spinner.succeed(chalk.green(`Successfully built custom Node.js MCP: ${pkg.name || repoName}`));
       return {
-        name: pkg.name || repoName,
+        name: toMcpServerName(pkg.name || repoName),
         command: 'node',
         args: [absoluteEntryPoint],
         envKeys: [] // Ask user later or default to empty
@@ -307,7 +396,7 @@ async function buildMcpFromSource(source: string): Promise<McpRegistryEntry | nu
 
       spinner.succeed(chalk.green(`Successfully built custom Go MCP: ${repoName}`));
       return {
-        name: repoName,
+        name: toMcpServerName(repoName),
         command: absoluteEntryPoint,
         args: [],
         envKeys: []
