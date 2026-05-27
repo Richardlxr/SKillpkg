@@ -116,6 +116,8 @@ cursor
 
 Inside a Git repository or a directory containing `skm.mod`, `skm install <source>` defaults to **project scope** and saves Git sources to `skm.mod` / `skm.sum` so teammates can reproduce the project setup. Project skills are written once to `.agents/skills/`; Claude Code and Cursor receive compatibility symlinks at `.claude/skills/` and `.cursor/skills/`.
 
+Project-local skills that already live under `.agents/skills/<name>` are first-class project dependencies. `skm init` records them as `skill ./.agents/skills/<name>` and locks their content in `skm.sum`, so they can be committed and shared without a download source. See [Project Skills and MCP Scope](docs/project-scope.md) for the detailed scope rules.
+
 ```bash
 # Inject only into this project's Codex config
 skm install owner/repo --scope project --agent codex
@@ -190,7 +192,26 @@ skm assign
 - **Global scope** targets the whole machine and writes to user-level agent skills/MCP configuration.
 - **Project scope** targets the current repository and writes to local agent directories or project MCP configuration.
 - `skm install <source>` defaults to project scope inside a Git repository or a directory with `skm.mod`; outside a project it defaults to global scope.
-- If a project skill has the same name as a global skill, the project skill overrides the global injection for that project so agents do not see two same-named skills.
+- If a project skill has the same name as a global skill, `skillpkg` keeps both scopes and labels the coexistence in `list`, `info`, and `status`. Use explicit promote, demote, or uninstall commands when you want to move or remove one scope.
+
+### Promote and Demote Scope
+
+```bash
+# Copy a current-project skill into global scope and keep the project copy
+skm promote skill reviewer
+
+# Move a project skill to global scope
+skm promote skill reviewer --remove-project
+
+# Move a global skill into the current project
+skm demote skill reviewer
+
+# Move project/global MCP assignments between scopes
+skm promote mcp playwright
+skm demote mcp playwright
+```
+
+For skills, promote copies by default because a good local project skill may also be useful globally. Demote records remote skills by source, but local or tracked global skills are copied into `.agents/skills/<name>` and saved as project-local dependencies. MCP promote/demote moves agent assignments to avoid duplicate server definitions.
 
 ### Injection Model
 
@@ -335,6 +356,8 @@ replace github.com/remote/skill => ../local-dev-copy
 Running `skm install` without arguments reads the current directory's `skm.mod` and installs into project scope by default.
 
 ## Integrity, Updates, and Maintenance
+
+`skm outdated` and `skm update` compare remote Git sources only. Project-local, linked, and tracked skills are verified by hash but skipped for update because they do not have an upstream commit to pull.
 
 ```bash
 # Check for updates

@@ -532,6 +532,7 @@ export async function checkOutdated(): Promise<void> {
   const spinner = ora('Checking for updates...').start();
   const config = getDefaultConfig();
   const outdated: OutdatedInfo[] = [];
+  let skipped = 0;
 
   for (const row of rows) {
     const name = row['name'] as string;
@@ -539,6 +540,12 @@ export async function checkOutdated(): Promise<void> {
     const currentCommit = row['source_commit'] as string;
 
     spinner.text = `Checking ${name}...`;
+
+    if (!isRemoteUpdatableSkill(row)) {
+      logger.debug(`Skipping local skill: ${name}`);
+      skipped++;
+      continue;
+    }
 
     try {
       // Pull latest from remote
@@ -564,6 +571,10 @@ export async function checkOutdated(): Promise<void> {
   const hasUpdates = outdated.filter((o) => o.hasUpdate);
 
   if (hasUpdates.length === 0) {
+    if (outdated.length === 0 && skipped > 0) {
+      logger.success(`No remote Git skills to check (${skipped} local/linked/tracked skipped)`);
+      return;
+    }
     logger.success('All skills are up to date');
     return;
   }
@@ -1012,6 +1023,8 @@ export async function updateSkills(
   }
 
   let updated = 0;
+  let checked = 0;
+  let skipped = 0;
   for (const row of rows) {
     const name = row['name'] as string;
     const source = row['source_url'] as string;
@@ -1019,7 +1032,14 @@ export async function updateSkills(
 
     logger.skill(name, 'Checking for updates...');
 
+    if (!isRemoteUpdatableSkill(row)) {
+      logger.skill(name, 'Local or tracked source; skipping update');
+      skipped++;
+      continue;
+    }
+
     try {
+      checked++;
       const config = getDefaultConfig();
       const repoDir = await cloneOrPull(repoSourceFromInstallSource(source), config.cacheDir);
       const latestCommit = await getCommitSha(repoDir);
@@ -1046,11 +1066,22 @@ export async function updateSkills(
   }
 
   logger.blank();
-  logger.success(`Updated ${updated} of ${rows.length} skill(s)`);
+  logger.success(`Updated ${updated} of ${checked} remote skill(s)`);
+  if (skipped > 0) {
+    logger.info(`Skipped ${skipped} local/linked/tracked skill(s)`);
+  }
 }
 
 function repoSourceFromInstallSource(source: string): string {
   return source.split('#')[0];
+}
+
+function isRemoteUpdatableSkill(row: Record<string, unknown>): boolean {
+  const source = String(row['source_url'] || '');
+  const commit = String(row['source_commit'] || '');
+  if (!source || isLocalPathSource(source)) return false;
+  if (['local', 'linked', 'tracked'].includes(commit)) return false;
+  return true;
 }
 
 // ─────────────────────────────────────────────────────────────

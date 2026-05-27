@@ -116,6 +116,8 @@ cursor
 
 在 Git 仓库或包含 `skm.mod` 的目录里，`skm install <source>` 默认安装到 **project scope**，并把 Git 来源保存到 `skm.mod` / `skm.sum`，方便团队复现。项目级 skill 只真实写入 `.agents/skills/`；Claude Code 和 Cursor 会分别通过 `.claude/skills/`、`.cursor/skills/` 兼容 symlink 读取同一份内容。
 
+已经放在 `.agents/skills/<name>` 下的项目本地 skill 也是一等项目依赖。`skm init` 会把它们记录为 `skill ./.agents/skills/<name>`，并把内容哈希写入 `skm.sum`，这样即使没有下载源，也可以随仓库提交给团队复现。完整规则见 [Project Skills and MCP Scope](docs/project-scope.md)。
+
 ```bash
 # 只给当前项目的 Codex 注入
 skm install owner/repo --scope project --agent codex
@@ -190,7 +192,26 @@ skm assign
 - **Global scope**：面向整台机器，写入各 Agent 的用户级 skills/MCP 配置。
 - **Project scope**：面向当前仓库，写入当前项目下的 Agent 目录或项目 MCP 配置。
 - 在 Git 仓库或包含 `skm.mod` 的目录内运行 `skm install <source>` 时，默认是 project scope；在项目外默认是 global scope。
-- 如果项目级 skill 与全局 skill 同名，项目级记录会覆盖当前项目里的全局注入，避免 Agent 同时看到两份同名 skill。
+- 如果项目级 skill 与全局 skill 同名，`skillpkg` 会保留两个 scope，并在 `list`、`info`、`status` 中标记共存状态。需要移动或删除某个 scope 时，请显式使用 promote、demote 或 uninstall。
+
+### 提权和降级 scope
+
+```bash
+# 把当前项目的 skill 复制到 global，并保留项目副本
+skm promote skill reviewer
+
+# 把项目 skill 移动到 global
+skm promote skill reviewer --remove-project
+
+# 把 global skill 移动到当前项目
+skm demote skill reviewer
+
+# 在 project/global 之间移动 MCP 的 Agent 分配
+skm promote mcp playwright
+skm demote mcp playwright
+```
+
+skill 的 promote 默认是复制，因为好用的项目本地 skill 往往也值得提权到全局。demote 远程 skill 时会保留远程来源；demote 本地或 tracked 的 global skill 时，会复制到 `.agents/skills/<name>` 并记录成项目本地依赖。MCP 的 promote/demote 则移动 Agent 分配，避免重复 server 定义。
 
 ### 注入模型
 
@@ -335,6 +356,8 @@ replace github.com/remote/skill => ../local-dev-copy
 不带参数运行 `skm install` 会读取当前目录的 `skm.mod`，并默认安装到 project scope。
 
 ## 完整性、更新与维护
+
+`skm outdated` 和 `skm update` 只比较远程 Git 来源。项目本地、linked、tracked 的 skill 会通过哈希校验完整性，但不会尝试更新，因为它们没有可拉取的上游 commit。
 
 ```bash
 # 检查更新

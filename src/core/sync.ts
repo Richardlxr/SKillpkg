@@ -22,7 +22,7 @@ import {
   isSymlinkInstallMode,
   legacyIsLinkedValue,
 } from '../utils/install_mode.js';
-import { loadSumfile, saveSumfile, updateSumfileEntry } from './sumfile.js';
+import { computeIntegrity, loadSumfile, saveSumfile, updateSumfileEntry } from './sumfile.js';
 
 /** Sync skills across all detected agents */
 export async function syncAgents(
@@ -45,16 +45,6 @@ export async function syncAgents(
   const skills = db
     .prepare('SELECT * FROM skills WHERE scope = ? AND project_path = ?')
     .all(scope, projectPath) as Record<string, unknown>[];
-  const projectOverrideNames = scope === 'global'
-    ? new Set((db
-        .prepare("SELECT name FROM skills WHERE scope = 'project' AND project_path = ?")
-        .all(process.cwd()) as { name: string }[]).map((row) => row.name))
-    : new Set<string>();
-  const globalNames = scope === 'project'
-    ? new Set((db
-        .prepare("SELECT name FROM skills WHERE scope = 'global' AND project_path = ''")
-        .all() as { name: string }[]).map((row) => row.name))
-    : new Set<string>();
 
   if (skills.length === 0) {
     spinner.info('No skills to sync');
@@ -73,14 +63,6 @@ export async function syncAgents(
     for (const skill of skills) {
       const name = skill['name'] as string;
       const assigned = skill['assigned_agents'] as string;
-
-      if (scope === 'global' && projectOverrideNames.has(name)) {
-        if (existingNames.has(name)) {
-          await agent.uninstallSkill(name, 'global');
-          logger.agent(agent.displayName, `Skipped global ${name}; current project has an override`);
-        }
-        continue;
-      }
       
       let isAssigned = false;
       if (!assigned || assigned === 'all') {
@@ -105,10 +87,6 @@ export async function syncAgents(
           logger.agent(agent.displayName, `Unsynced (removed) ${name}`);
         }
         continue;
-      }
-
-      if (scope === 'project' && globalNames.has(name)) {
-        await agent.uninstallSkill(name, 'global');
       }
 
       if (existingNames.has(name)) {
@@ -415,12 +393,18 @@ export async function promoteSkillToGlobal(
   }
 
   if (options.removeProject && targetAgent === 'all') {
+    const projectRequirement = db
+      .prepare('SELECT skill_source FROM project_skills WHERE installed_skill_id = ? LIMIT 1')
+      .get(projectSkill['id']) as { skill_source: string } | undefined;
     const projectSumfile = await loadSumfile({ scope: 'project', projectPath });
     projectSumfile.delete(projectSkill['source_url'] as string || skillName);
     await saveSumfile(projectSumfile, { scope: 'project', projectPath });
 
     db.prepare('DELETE FROM project_skills WHERE installed_skill_id = ?').run(projectSkill['id']);
     db.prepare('DELETE FROM skills WHERE id = ?').run(projectSkill['id']);
+
+    const { removeSkillRequirement } = await import('./modfile.js');
+    await removeSkillRequirement(projectRequirement?.skill_source || (projectSkill['source_url'] as string) || skillName, projectPath);
   } else if (options.removeProject) {
     logger.warn('Project DB record was kept because --remove-project only removes records when promoting to all agents.');
   }
@@ -438,6 +422,12 @@ function isProjectLocalSkill(skill: Record<string, unknown>): boolean {
     || source.startsWith('./.agents/skills/')
     || source.startsWith('.agents/skills/')
     || skill['source_commit'] === 'local';
+}
+
+function isLocalSkillRecord(skill: Record<string, unknown>): boolean {
+  const source = String(skill['source_url'] || '');
+  const commit = String(skill['source_commit'] || '');
+  return isLocalPathSource(source) || ['local', 'linked', 'tracked'].includes(commit);
 }
 
 /** Demote a global skill into the current project scope and apply it to target agent(s). */
@@ -479,10 +469,15 @@ export async function demoteSkillToProject(
   }
 
   const sourceUrl = globalSkill['source_url'] as string;
-  const requestedMode = !sourceUrl.startsWith('file://') && options.mode === 'symlink-dev'
+  const demotingLocalSkill = isLocalSkillRecord(globalSkill);
+  const projectSourceUrl = demotingLocalSkill ? `./.agents/skills/${skillName}` : sourceUrl;
+  const projectSourceCommit = demotingLocalSkill ? 'local' : globalSkill['source_commit'] as string;
+  const requestedMode = !isLocalPathSource(sourceUrl) && options.mode === 'symlink-dev'
     ? 'symlink-cache'
     : options.mode;
-  const installMode = requestedMode || (sourceUrl.startsWith('file://') ? 'symlink-dev' : defaultInstallModeForScope('project'));
+  const installMode = demotingLocalSkill
+    ? 'copy'
+    : requestedMode || defaultInstallModeForScope('project');
   let installedPath: string;
   try {
     installedPath = await resolveSkillSourcePath(db, globalSkill);
@@ -498,25 +493,43 @@ export async function demoteSkillToProject(
       description: (globalSkill['description'] as string) || '',
     },
     localPath: installedPath,
-    sourceUrl,
-    commit: globalSkill['source_commit'] as string,
+    sourceUrl: projectSourceUrl,
+    commit: projectSourceCommit,
     integrity: globalSkill['integrity'] as string,
   };
 
+  const successfulAgents: typeof agents = [];
   for (const agent of agents) {
     try {
       await agent.installSkill(skillPackage, 'project', { installMode });
       await agent.uninstallSkill(skillName, 'global');
+      successfulAgents.push(agent);
     } catch (err) {
       logger.warn(`Failed to demote ${skillName} on ${agent.displayName}: ${(err as Error).message}`);
     }
   }
 
+  if (successfulAgents.length === 0) {
+    logger.error(`Failed to demote skill "${skillName}" to any target agent`);
+    return;
+  }
+
   const now = new Date().toISOString();
-  const assignedAgents = mergedAssignment(undefined, targetAgent, agents.map((agent) => agent.name));
-  const symlinkTarget = isSymlinkInstallMode(installMode) ? installedPath : null;
+  const assignedAgents = targetAgent === 'all' && successfulAgents.length === agents.length
+    ? 'all'
+    : JSON.stringify(successfulAgents.map((agent) => agent.name));
   const unifiedPath = join(unifiedProjectSkillsDir(projectPath), skillName);
+  const projectInstalledPath = demotingLocalSkill ? unifiedPath : installedPath;
+  const symlinkTarget = isSymlinkInstallMode(installMode) ? installedPath : null;
   const isLinked = legacyIsLinkedValue(installMode);
+  const projectIntegrity = await computeIntegrity(projectInstalledPath);
+  const projectSkillPackage = {
+    ...skillPackage,
+    localPath: projectInstalledPath,
+    sourceUrl: projectSourceUrl,
+    commit: projectSourceCommit,
+    integrity: projectIntegrity,
+  };
   const existingProject = db.prepare(`
     SELECT id
     FROM skills
@@ -533,15 +546,15 @@ export async function demoteSkillToProject(
         install_mode = ?, is_linked = ?, assigned_agents = ?, updated_at = ?
       WHERE id = ?
     `).run(
-      sourceUrl,
-      globalSkill['source_commit'],
+      projectSourceUrl,
+      projectSourceCommit,
       globalSkill['version'],
       globalSkill['description'],
       globalSkill['alias'] || null,
-      installedPath,
+      projectInstalledPath,
       unifiedPath,
       symlinkTarget,
-      globalSkill['integrity'] || '',
+      projectIntegrity,
       installMode,
       isLinked,
       assignedAgents,
@@ -558,16 +571,16 @@ export async function demoteSkillToProject(
     `).run(
       projectSkillId,
       skillName,
-      sourceUrl,
-      globalSkill['source_commit'],
+      projectSourceUrl,
+      projectSourceCommit,
       globalSkill['version'],
       globalSkill['description'],
       projectPath,
       globalSkill['alias'] || null,
-      installedPath,
+      projectInstalledPath,
       unifiedPath,
       symlinkTarget,
-      globalSkill['integrity'] || '',
+      projectIntegrity,
       installMode,
       isLinked,
       now,
@@ -582,7 +595,7 @@ export async function demoteSkillToProject(
     ON CONFLICT(project_path, skill_source) DO UPDATE SET
       version = excluded.version,
       installed_skill_id = excluded.installed_skill_id
-  `).run(genId(), projectPath, sourceUrl, globalSkill['version'] || null, projectSkillId);
+  `).run(genId(), projectPath, projectSourceUrl, null, projectSkillId);
 
   if (targetAgent === 'all') {
     const globalSumfile = await loadSumfile({ scope: 'global' });
@@ -593,8 +606,14 @@ export async function demoteSkillToProject(
   }
 
   const projectSumfile = await loadSumfile({ scope: 'project', projectPath });
-  updateSumfileEntry(projectSumfile, skillPackage);
+  updateSumfileEntry(projectSumfile, projectSkillPackage);
   await saveSumfile(projectSumfile, { scope: 'project', projectPath });
+
+  const { saveSkillRequirement } = await import('./modfile.js');
+  await saveSkillRequirement(projectSourceUrl, undefined, { cwd: projectPath, allowCreate: true });
+
+  const { handleProjectGitTracking } = await import('./git_tracking.js');
+  await handleProjectGitTracking({ cwd: projectPath, refreshExisting: true });
 
   logger.success(`Demoted skill "${skillName}" to project scope`);
 }

@@ -14,7 +14,6 @@ import type {
   SkillPackage,
   InstallOptions,
   AgentType,
-  AgentAdapter,
   InstallScope,
 } from '../types/index.js';
 import { formatSourceForDisplay, parseSourceString, parseSkillMd } from '../parsers/index.js';
@@ -24,7 +23,7 @@ import { getDefaultConfig, unifiedProjectSkillsDir } from '../utils/platform.js'
 import { isLocalPathSource, localPathFromSource } from '../utils/path_source.js';
 import { promptForSearchableSelection } from '../utils/searchable_selection.js';
 import { getDb, genId } from '../db/index.js';
-import { detectAgents, getAllAdapters, resolveAdapters } from '../adapters/index.js';
+import { getAllAdapters, resolveAdapters } from '../adapters/index.js';
 import { applyReplaceDirectives } from './replace.js';
 import { runSetup } from './hooks.js';
 import { loadSumfile, saveSumfile, updateSumfileEntry, computeIntegrity } from './sumfile.js';
@@ -174,7 +173,7 @@ export async function installSkill(
           `  ${chalk.gray('Options:')}\n` +
           `  ${chalk.cyan('--replace')}  Replace with the new source\n` +
           `  ${chalk.cyan('--alias')}    Install under a different name\n` +
-          `  ${chalk.cyan('--scope project')}  Install at project level (overrides global)`
+          `  ${chalk.cyan('--scope project')}  Install at project level (can coexist with global)`
         );
         return;
       }
@@ -342,7 +341,7 @@ export async function installSkill(
     }
 
     if (scope === 'project') {
-      await removeShadowedGlobalSkill(skillName, targetAgent as AgentType | 'all', adapters);
+      await warnAboutCoexistingGlobalSkill(skillName);
     }
 
     // 15. Update sumfile (go.sum style)
@@ -425,85 +424,21 @@ async function buildSkillSelectionChoices(repoDir: string, foundSkills: string[]
   }));
 }
 
-async function removeShadowedGlobalSkill(
-  skillName: string,
-  targetAgent: AgentType | 'all',
-  adapters: AgentAdapter[]
-): Promise<void> {
-  if (adapters.length === 0) return;
-
+async function warnAboutCoexistingGlobalSkill(skillName: string): Promise<void> {
   const db = await getDb();
   const globalSkill = db.prepare(`
-    SELECT *
+    SELECT id
     FROM skills
     WHERE name = ? AND scope = 'global' AND project_path = ''
     LIMIT 1
-  `).get(skillName) as Record<string, unknown> | undefined;
+  `).get(skillName) as { id: string } | undefined;
 
   if (!globalSkill) return;
 
   logger.warn(
-    `Project skill "${skillName}" overrides a global install; removing the global injection from target agent(s).`
+    `Project skill "${skillName}" coexists with a global install. ` +
+    `skm keeps both scopes; use skm promote/demote/uninstall to move or remove a scope intentionally.`
   );
-
-  const mcpConfigs = db
-    .prepare('SELECT * FROM mcp_configs WHERE skill_id = ?')
-    .all(globalSkill['id'] as string) as Record<string, unknown>[];
-
-  for (const adapter of adapters) {
-    await adapter.uninstallSkill(skillName, 'global');
-    for (const mcp of mcpConfigs) {
-      await adapter.removeMCP(mcp['name'] as string, 'global');
-    }
-  }
-
-  const remainingAssignments = await remainingGlobalAssignments(
-    globalSkill['assigned_agents'] as string | undefined,
-    targetAgent,
-    adapters.map((adapter) => adapter.name)
-  );
-
-  if (remainingAssignments.length === 0) {
-    const source = globalSkill['source_url'] as string || skillName;
-    const sumfile = await loadSumfile({ scope: 'global' });
-    sumfile.delete(source);
-    await saveSumfile(sumfile, { scope: 'global' });
-
-    db.prepare('DELETE FROM skills WHERE id = ?').run(globalSkill['id']);
-    logger.info(`Removed global record for "${skillName}" because it is now project-scoped.`);
-    return;
-  }
-
-  db.prepare('UPDATE skills SET assigned_agents = ?, updated_at = ? WHERE id = ?')
-    .run(JSON.stringify(remainingAssignments), new Date().toISOString(), globalSkill['id']);
-}
-
-async function remainingGlobalAssignments(
-  assignedAgents: string | undefined,
-  targetAgent: AgentType | 'all',
-  targetAgentNames: AgentType[]
-): Promise<AgentType[]> {
-  if (targetAgent === 'all') return [];
-
-  let currentAssignments = parseAssignedAgents(assignedAgents);
-  if (currentAssignments.length === 0) {
-    currentAssignments = (await detectAgents()).map((adapter) => adapter.name);
-  }
-
-  const targets = new Set(targetAgentNames);
-  return currentAssignments.filter((agentName) => !targets.has(agentName));
-}
-
-function parseAssignedAgents(value: string | undefined): AgentType[] {
-  if (!value || value === 'all') return [];
-  try {
-    const parsed = JSON.parse(value) as unknown;
-    return Array.isArray(parsed)
-      ? parsed.filter((item): item is AgentType => typeof item === 'string')
-      : [];
-  } catch {
-    return [];
-  }
 }
 
 /** Uninstall a skill */

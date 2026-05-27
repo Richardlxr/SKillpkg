@@ -1,7 +1,7 @@
 import { cp, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { join, resolve } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { closeDb, genId, getDb } from '../src/db/index.js';
 import { computeIntegrity, saveSumfile } from '../src/core/sumfile.js';
@@ -115,6 +115,76 @@ describe('skill promotion', () => {
 
     const projectSum = await readFile(join(projectDir, 'skm.sum'), 'utf-8');
     expect(projectSum).not.toContain('./.agents/skills/team-skill');
+    const projectMod = await readFile(join(projectDir, 'skm.mod'), 'utf-8');
+    expect(projectMod).not.toContain('./.agents/skills/team-skill');
+  });
+
+  it('demotes global local skills into .agents/skills and records a project-local dependency', async () => {
+    const { demoteSkillToProject } = await import('../src/core/sync.js');
+    const sourceDir = await writeSkill(join(root, 'store', 'global'), 'team-skill');
+    const integrity = await seedGlobalSkill(sourceDir, 'team-skill');
+    const agent = fakeAgent();
+    mocks.resolveAdapters.mockResolvedValue([agent]);
+
+    await demoteSkillToProject('team-skill');
+
+    const projectSkillDir = join(projectAgentDir, 'team-skill');
+    expect(existsSync(join(projectSkillDir, 'SKILL.md'))).toBe(true);
+    expect(agent.uninstallSkill).toHaveBeenCalledWith('team-skill', 'global');
+
+    const db = await getDb();
+    const projectRow = db.prepare(`
+      SELECT source_url, source_commit, installed_path, install_mode, symlink_target
+      FROM skills
+      WHERE name = 'team-skill' AND scope = 'project' AND project_path = ?
+    `).get(projectDir) as {
+      source_url: string;
+      source_commit: string;
+      installed_path: string;
+      install_mode: string;
+      symlink_target: string | null;
+    } | undefined;
+    expect(projectRow).toMatchObject({
+      source_url: './.agents/skills/team-skill',
+      source_commit: 'local',
+      installed_path: projectSkillDir,
+      install_mode: 'copy',
+      symlink_target: null,
+    });
+    expect(db.prepare(`
+      SELECT id
+      FROM skills
+      WHERE name = 'team-skill' AND scope = 'global' AND project_path = ''
+    `).get()).toBeUndefined();
+
+    const projectMod = await readFile(join(projectDir, 'skm.mod'), 'utf-8');
+    expect(projectMod).toContain('skill ./.agents/skills/team-skill');
+    const projectSum = await readFile(join(projectDir, 'skm.sum'), 'utf-8');
+    expect(projectSum).toContain(`./.agents/skills/team-skill 0.0.0 ${integrity}`);
+  });
+
+  it('sync preserves coexisting global and project scopes', async () => {
+    const { syncAgents } = await import('../src/core/sync.js');
+    const projectSkillDir = await writeSkill(projectAgentDir, 'team-skill');
+    await seedProjectSkill(projectSkillDir, 'team-skill');
+    const globalSourceDir = await writeSkill(join(root, 'store', 'global'), 'team-skill');
+    await seedGlobalSkill(globalSourceDir, 'team-skill');
+    const agent = fakeAgent();
+    mocks.resolveAdapters.mockResolvedValue([agent]);
+
+    await syncAgents({ scope: 'project', agent: 'codex' });
+    expect(agent.uninstallSkill).not.toHaveBeenCalledWith('team-skill', 'global');
+
+    vi.mocked(agent.installSkill).mockClear();
+    vi.mocked(agent.uninstallSkill).mockClear();
+    await syncAgents({ scope: 'global', agent: 'codex' });
+
+    expect(agent.installSkill).toHaveBeenCalledWith(
+      expect.objectContaining({ localPath: globalSourceDir }),
+      'global',
+      expect.any(Object)
+    );
+    expect(agent.uninstallSkill).not.toHaveBeenCalled();
   });
 
   async function seedProjectSkill(skillDir: string, name: string): Promise<string> {
@@ -149,6 +219,37 @@ describe('skill promotion', () => {
         integrity,
       }],
     ]), { scope: 'project', projectPath: projectDir });
+    await writeFile(join(projectDir, 'skm.mod'), `module project\n\nskill ./.agents/skills/${name}\n`);
+    return integrity;
+  }
+
+  async function seedGlobalSkill(skillDir: string, name: string): Promise<string> {
+    const db = await getDb();
+    const now = new Date().toISOString();
+    const id = genId();
+    const integrity = await computeIntegrity(skillDir);
+    const sourceUrl = `file://${skillDir}`;
+    db.prepare(`
+      INSERT INTO skills
+        (id, name, source_url, source_commit, version, description, scope, project_path, alias, installed_path, unified_path, symlink_target, integrity, install_mode, is_linked, installed_at, updated_at, assigned_agents)
+      VALUES (?, ?, ?, 'local', '0.0.0', ?, 'global', '', NULL, ?, NULL, NULL, ?, 'copy', 0, ?, ?, 'all')
+    `).run(
+      id,
+      name,
+      sourceUrl,
+      `${name} skill`,
+      skillDir,
+      integrity,
+      now,
+      now
+    );
+    await saveSumfile(new Map([
+      [sourceUrl, {
+        source: sourceUrl,
+        version: '0.0.0',
+        integrity,
+      }],
+    ]), { scope: 'global' });
     return integrity;
   }
 
@@ -160,6 +261,9 @@ describe('skill promotion', () => {
       getSkillsDir: (scope: InstallScope) => scope === 'global' ? globalDir : projectAgentDir,
       installSkill: vi.fn(async (skill: SkillPackage, scope: InstallScope) => {
         const target = join(scope === 'global' ? globalDir : projectAgentDir, skill.frontmatter.name);
+        if (resolve(skill.localPath) === resolve(target)) {
+          return;
+        }
         await rm(target, { recursive: true, force: true });
         await mkdir(scope === 'global' ? globalDir : projectAgentDir, { recursive: true });
         await cp(skill.localPath, target, { recursive: true, force: true });
