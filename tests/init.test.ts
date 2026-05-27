@@ -6,11 +6,23 @@ import { basename, join, resolve } from 'node:path';
 import { initManifest } from '../src/core/commands.js';
 import { closeDb, getDb, genId } from '../src/db/index.js';
 
+const mocks = vi.hoisted(() => ({
+  prompt: vi.fn(),
+}));
+
+vi.mock('inquirer', () => ({
+  default: {
+    prompt: mocks.prompt,
+  },
+}));
+
 describe('skm init', () => {
   let root: string;
   let oldHome: string | undefined;
   let oldSkillpkgHome: string | undefined;
   let oldDataDir: string | undefined;
+  let stdinDescriptor: PropertyDescriptor | undefined;
+  let stdoutDescriptor: PropertyDescriptor | undefined;
 
   beforeEach(async () => {
     closeDb();
@@ -22,11 +34,16 @@ describe('skm init', () => {
     process.env['SKILLPKG_HOME_DIR'] = join(root, 'home');
     process.env['SKILLPKG_DATA_DIR'] = join(root, 'data');
     vi.spyOn(process, 'cwd').mockReturnValue(root);
+    mocks.prompt.mockReset();
+    stdinDescriptor = Object.getOwnPropertyDescriptor(process.stdin, 'isTTY');
+    stdoutDescriptor = Object.getOwnPropertyDescriptor(process.stdout, 'isTTY');
   });
 
   afterEach(async () => {
     vi.restoreAllMocks();
     closeDb();
+    restoreDescriptor(process.stdin, 'isTTY', stdinDescriptor);
+    restoreDescriptor(process.stdout, 'isTTY', stdoutDescriptor);
     restoreEnv('HOME', oldHome);
     restoreEnv('SKILLPKG_HOME_DIR', oldSkillpkgHome);
     restoreEnv('SKILLPKG_DATA_DIR', oldDataDir);
@@ -152,6 +169,75 @@ describe('skm init', () => {
     });
   });
 
+  it('asks before adopting sourced project skill symlinks that do not match skm.sum', async () => {
+    const cachedSkill = join(root, 'cache', 'remote-skill');
+    const projectSkill = join(root, '.agents', 'skills', 'remote-skill');
+    await writeSkill(cachedSkill, 'remote-skill');
+    await mkdir(join(root, '.agents', 'skills'), { recursive: true });
+    await symlink(cachedSkill, projectSkill, 'dir');
+    await writeFile(join(root, 'skm.sum'), [
+      'https://github.com/acme/remote-skill.git 0.0.0 sha256-stale',
+      '',
+    ].join('\n'));
+
+    const db = await getDb();
+    const now = new Date().toISOString();
+    db.prepare(`
+      INSERT INTO skills
+        (id, name, source_url, source_commit, version, description, scope, project_path, alias, installed_path, unified_path, symlink_target, integrity, install_mode, is_linked, installed_at, updated_at, assigned_agents)
+      VALUES (?, 'remote-skill', 'https://github.com/acme/remote-skill.git', 'abc1234', '0.0.0', 'remote skill', 'project', ?, NULL, ?, ?, ?, 'sha256-old', 'symlink-cache', 1, ?, ?, 'all')
+    `).run(genId(), root, cachedSkill, projectSkill, cachedSkill, now, now);
+
+    setTTY(true);
+    mocks.prompt.mockImplementation(async (questions: Array<{ name: string }>) => {
+      const name = questions[0]?.name;
+      if (name === 'acceptMismatchedSkill') return { acceptMismatchedSkill: false };
+      if (name === 'gitPreference') return { gitPreference: 'track' };
+      return {};
+    });
+
+    await initManifest(undefined, true);
+
+    expect(mocks.prompt).toHaveBeenCalledWith(expect.arrayContaining([
+      expect.objectContaining({ name: 'acceptMismatchedSkill' }),
+    ]));
+
+    const mod = await readFile(join(root, 'skm.mod'), 'utf-8');
+    expect(mod).toContain('skill https://github.com/acme/remote-skill.git');
+
+    const sum = await readFile(join(root, 'skm.sum'), 'utf-8');
+    expect(sum).toContain('https://github.com/acme/remote-skill.git 0.0.0 sha256-stale');
+  });
+
+  it('updates skm.sum for mismatched sourced project skill symlinks when accepted non-interactively', async () => {
+    const cachedSkill = join(root, 'cache', 'remote-skill');
+    const projectSkill = join(root, '.agents', 'skills', 'remote-skill');
+    await writeSkill(cachedSkill, 'remote-skill');
+    await mkdir(join(root, '.agents', 'skills'), { recursive: true });
+    await symlink(cachedSkill, projectSkill, 'dir');
+    await writeFile(join(root, 'skm.sum'), [
+      'https://github.com/acme/remote-skill.git 0.0.0 sha256-stale',
+      '',
+    ].join('\n'));
+
+    const db = await getDb();
+    const now = new Date().toISOString();
+    db.prepare(`
+      INSERT INTO skills
+        (id, name, source_url, source_commit, version, description, scope, project_path, alias, installed_path, unified_path, symlink_target, integrity, install_mode, is_linked, installed_at, updated_at, assigned_agents)
+      VALUES (?, 'remote-skill', 'https://github.com/acme/remote-skill.git', 'abc1234', '0.0.0', 'remote skill', 'project', ?, NULL, ?, ?, ?, 'sha256-old', 'symlink-cache', 1, ?, ?, 'all')
+    `).run(genId(), root, cachedSkill, projectSkill, cachedSkill, now, now);
+
+    await initManifest(undefined, false);
+
+    const mod = await readFile(join(root, 'skm.mod'), 'utf-8');
+    expect(mod).toContain('skill https://github.com/acme/remote-skill.git');
+
+    const sum = await readFile(join(root, 'skm.sum'), 'utf-8');
+    expect(sum).toContain('https://github.com/acme/remote-skill.git 0.0.0 sha256-');
+    expect(sum).not.toContain('sha256-stale');
+  });
+
   it('adopts project MCP config into mod and sum', async () => {
     const repoRoot = join(root, 'data', 'mcp-cache', 'github.com', 'acme', 'demo-mcp');
     const mcpProject = join(repoRoot, 'server');
@@ -213,5 +299,22 @@ function restoreEnv(name: string, value: string | undefined): void {
     delete process.env[name];
   } else {
     process.env[name] = value;
+  }
+}
+
+function setTTY(value: boolean): void {
+  Object.defineProperty(process.stdin, 'isTTY', { configurable: true, value });
+  Object.defineProperty(process.stdout, 'isTTY', { configurable: true, value });
+}
+
+function restoreDescriptor(
+  stream: NodeJS.ReadStream | NodeJS.WriteStream,
+  property: 'isTTY',
+  descriptor: PropertyDescriptor | undefined
+): void {
+  if (descriptor) {
+    Object.defineProperty(stream, property, descriptor);
+  } else {
+    delete (stream as unknown as Record<string, unknown>)[property];
   }
 }

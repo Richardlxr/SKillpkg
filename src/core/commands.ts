@@ -113,6 +113,9 @@ ${description}
   for (const source of projectSkillSources) {
     await saveSkillRequirement(source.source, undefined, { cwd, allowCreate: true });
     if (source.kind === 'dependency') {
+      if (!(await shouldAdoptProjectDependencySkill(cwd, source, interactive))) {
+        continue;
+      }
       await adoptProjectDependencySkill(cwd, source);
     } else {
       await adoptProjectLocalSkill(cwd, source.source);
@@ -243,6 +246,52 @@ async function adoptProjectLocalSkill(cwd: string, source: string): Promise<void
     integrity,
   });
   await saveSumfile(sumfile, { scope: 'project', projectPath: cwd });
+}
+
+async function shouldAdoptProjectDependencySkill(
+  cwd: string,
+  source: Extract<ProjectSkillSource, { kind: 'dependency' }>,
+  interactive: boolean
+): Promise<boolean> {
+  const frontmatter = await parseSkillMd(source.skillDir);
+  const skillName = frontmatter?.name || source.source;
+  const sumfile = await loadSumfile({ scope: 'project', projectPath: cwd });
+  const result = await verifyIntegrity(source.source, source.skillDir, sumfile);
+
+  if (result.valid) return true;
+
+  if (result.reason === 'missing-entry') {
+    logger.warn(`Project skill "${skillName}" from ${source.source} has no skm.sum entry; recording the current copy.`);
+    return true;
+  }
+
+  logger.warn(`Project skill "${skillName}" from ${source.source} does not match skm.sum.`);
+  logger.warn(`Expected ${result.expected}, got ${result.actual}.`);
+
+  if (!interactive) {
+    logger.warn('Using the current copy because --yes/non-interactive mode was requested.');
+    return true;
+  }
+
+  if (!process.stdin.isTTY || !process.stdout.isTTY) {
+    logger.warn('Skipping this dependency because the current shell cannot prompt for confirmation.');
+    logger.info('Run skm init interactively to review it, or run skm init -y to accept the current copy.');
+    return false;
+  }
+
+  const { default: inquirer } = await import('inquirer');
+  const { acceptMismatchedSkill } = await inquirer.prompt<{ acceptMismatchedSkill: boolean }>([{
+    type: 'confirm',
+    name: 'acceptMismatchedSkill',
+    message: `Use the current local copy of "${skillName}" and update skm.sum?`,
+    default: false,
+  }]);
+
+  if (!acceptMismatchedSkill) {
+    logger.warn(`Kept ${source.source} in skm.mod without updating skm.sum from the current local copy.`);
+  }
+
+  return acceptMismatchedSkill;
 }
 
 async function adoptProjectDependencySkill(cwd: string, source: Extract<ProjectSkillSource, { kind: 'dependency' }>): Promise<void> {
