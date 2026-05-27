@@ -373,11 +373,13 @@ const promoteCmd = program
 
 promoteCmd
   .command('skill <skill-name>')
-  .description('Promote a project skill to global scope')
+  .description('Copy a project skill to global scope')
   .option('--agent <agent>', 'Target agent (or "all")', 'all')
+  .option('--remove-project', 'Remove the project-scoped install after promoting to all agents')
   .action(async (skillName: string, opts: Record<string, unknown>) => {
     await promoteSkillToGlobal(skillName, {
       agent: opts['agent'] as AgentType | 'all',
+      removeProject: Boolean(opts['removeProject']),
     });
   });
 

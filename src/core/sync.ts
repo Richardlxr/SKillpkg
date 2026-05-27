@@ -14,7 +14,7 @@ import { logger } from '../utils/logger.js';
 import { getDefaultConfig, unifiedProjectSkillsDir } from '../utils/platform.js';
 import { pathExists } from '../utils/fs.js';
 import { cloneOrPull, checkout, repoUrlToLocalPath } from '../utils/git.js';
-import { isLocalPathSource, localPathFromSource } from '../utils/path_source.js';
+import { fileUrlFromPath, isLocalPathSource, localPathFromSource } from '../utils/path_source.js';
 import { parseSourceString } from '../parsers/index.js';
 import {
   defaultInstallModeForScope,
@@ -276,7 +276,7 @@ function updateSkillAssignment(
 /** Promote a project skill to global scope and apply it to target agent(s). */
 export async function promoteSkillToGlobal(
   skillName: string,
-  options: { agent?: AgentType | 'all' } = {}
+  options: { agent?: AgentType | 'all'; removeProject?: boolean } = {}
 ): Promise<void> {
   const targetAgent = options.agent || 'all';
   const db = await getDb();
@@ -331,16 +331,39 @@ export async function promoteSkillToGlobal(
     integrity: projectSkill['integrity'] as string,
   };
 
+  const successfulAgents: typeof agents = [];
   for (const agent of agents) {
     try {
       await agent.installSkill(skillPackage, 'global', { installMode: 'copy' });
-      await agent.uninstallSkill(skillName, 'project');
+      if (options.removeProject) {
+        await agent.uninstallSkill(skillName, 'project');
+      }
+      successfulAgents.push(agent);
     } catch (err) {
       logger.warn(`Failed to promote ${skillName} on ${agent.displayName}: ${(err as Error).message}`);
     }
   }
 
+  if (successfulAgents.length === 0) {
+    logger.error(`Failed to promote skill "${skillName}" to any target agent`);
+    return;
+  }
+
   const now = new Date().toISOString();
+  const globalInstalledPath = join(successfulAgents[0].getSkillsDir('global'), skillName);
+  const promotedLocal = isProjectLocalSkill(projectSkill);
+  const globalSourceUrl = promotedLocal
+    ? fileUrlFromPath(globalInstalledPath)
+    : projectSkill['source_url'] as string;
+  const globalSourceCommit = promotedLocal
+    ? 'local'
+    : projectSkill['source_commit'] as string;
+  const globalSkillPackage = {
+    ...skillPackage,
+    localPath: globalInstalledPath,
+    sourceUrl: globalSourceUrl,
+    commit: globalSourceCommit,
+  };
   const existingGlobal = db.prepare(`
     SELECT id, assigned_agents
     FROM skills
@@ -359,12 +382,12 @@ export async function promoteSkillToGlobal(
         install_mode = 'copy', is_linked = 0, assigned_agents = ?, updated_at = ?
       WHERE id = ?
     `).run(
-      projectSkill['source_url'],
-      projectSkill['source_commit'],
+      globalSourceUrl,
+      globalSourceCommit,
       projectSkill['version'],
       projectSkill['description'],
       projectSkill['alias'] || null,
-      installedPath,
+      globalInstalledPath,
       projectSkill['integrity'] || '',
       assignedAgents,
       now,
@@ -378,12 +401,12 @@ export async function promoteSkillToGlobal(
     `).run(
       genId(),
       skillName,
-      projectSkill['source_url'],
-      projectSkill['source_commit'],
+      globalSourceUrl,
+      globalSourceCommit,
       projectSkill['version'],
       projectSkill['description'],
       projectSkill['alias'] || null,
-      installedPath,
+      globalInstalledPath,
       projectSkill['integrity'] || '',
       now,
       now,
@@ -391,20 +414,30 @@ export async function promoteSkillToGlobal(
     );
   }
 
-  if (targetAgent === 'all') {
+  if (options.removeProject && targetAgent === 'all') {
     const projectSumfile = await loadSumfile({ scope: 'project', projectPath });
     projectSumfile.delete(projectSkill['source_url'] as string || skillName);
     await saveSumfile(projectSumfile, { scope: 'project', projectPath });
 
     db.prepare('DELETE FROM project_skills WHERE installed_skill_id = ?').run(projectSkill['id']);
     db.prepare('DELETE FROM skills WHERE id = ?').run(projectSkill['id']);
+  } else if (options.removeProject) {
+    logger.warn('Project DB record was kept because --remove-project only removes records when promoting to all agents.');
   }
 
   const globalSumfile = await loadSumfile({ scope: 'global' });
-  updateSumfileEntry(globalSumfile, skillPackage);
+  updateSumfileEntry(globalSumfile, globalSkillPackage);
   await saveSumfile(globalSumfile, { scope: 'global' });
 
   logger.success(`Promoted skill "${skillName}" to global scope`);
+}
+
+function isProjectLocalSkill(skill: Record<string, unknown>): boolean {
+  const source = String(skill['source_url'] || '').replace(/\\/g, '/');
+  return source === '.'
+    || source.startsWith('./.agents/skills/')
+    || source.startsWith('.agents/skills/')
+    || skill['source_commit'] === 'local';
 }
 
 /** Demote a global skill into the current project scope and apply it to target agent(s). */
