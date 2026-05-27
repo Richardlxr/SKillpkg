@@ -381,9 +381,9 @@ async function selectMcpProjects(
 }
 
 async function buildMcpProject(workDir: string, repoName: string): Promise<McpRegistryEntry> {
-  const { exec } = await import('node:child_process');
+  const { execFile } = await import('node:child_process');
   const { promisify } = await import('node:util');
-  const execAsync = promisify(exec);
+  const execFileAsync = promisify(execFile);
   const ora = (await import('ora')).default;
   const chalk = (await import('chalk')).default;
 
@@ -403,23 +403,30 @@ async function buildMcpProject(workDir: string, repoName: string): Promise<McpRe
       }
 
       spinner.text = chalk.blue('Installing Node.js dependencies...');
-      await execAsync('npm install --ignore-scripts', { cwd: workDir });
-
-      for (const script of ['build', 'compile']) {
-        if (pkg?.scripts?.[script]) {
-          spinner.text = chalk.blue(`Running ${script} script...`);
-          await execAsync(`npm run ${script}`, { cwd: workDir });
-          break;
-        }
-      }
+      await execFileAsync(npmExecutable(), ['install', '--ignore-scripts'], { cwd: workDir, windowsHide: true });
 
       let entryPoint = await findNodeEntryPoint(workDir, pkg);
       if (!entryPoint) {
-        for (const script of ['prepare', 'prepack', 'prestart']) {
-          if (!pkg?.scripts?.[script]) continue;
+        for (const script of ['build', 'compile']) {
+          const scriptCommand = pkg?.scripts?.[script];
+          if (!scriptCommand) continue;
 
+          assertPackageScriptCanRun(script, scriptCommand);
           spinner.text = chalk.blue(`Running ${script} script...`);
-          await execAsync(`npm run ${script}`, { cwd: workDir });
+          await execFileAsync(npmExecutable(), ['run', script], { cwd: workDir, windowsHide: true });
+          entryPoint = await findNodeEntryPoint(workDir, pkg);
+          if (entryPoint) break;
+        }
+      }
+
+      if (!entryPoint) {
+        for (const script of ['prepare', 'prepack', 'prestart']) {
+          const scriptCommand = pkg?.scripts?.[script];
+          if (!scriptCommand) continue;
+
+          assertPackageScriptCanRun(script, scriptCommand);
+          spinner.text = chalk.blue(`Running ${script} script...`);
+          await execFileAsync(npmExecutable(), ['run', script], { cwd: workDir, windowsHide: true });
           entryPoint = await findNodeEntryPoint(workDir, pkg);
           if (entryPoint) break;
         }
@@ -443,7 +450,7 @@ async function buildMcpProject(workDir: string, repoName: string): Promise<McpRe
       spinner.text = chalk.blue('Setting up Python environment with uv...');
 
       try {
-        await execAsync('uv sync', { cwd: workDir });
+        await execFileAsync(nativeExecutable('uv'), ['sync'], { cwd: workDir, windowsHide: true });
       } catch (e: any) {
         throw new Error(`uv sync failed: ${e.message}. Is 'uv' installed?`);
       }
@@ -463,16 +470,17 @@ async function buildMcpProject(workDir: string, repoName: string): Promise<McpRe
 
     if (await pathExists(goModPath)) {
       spinner.text = chalk.blue('Building Go project...');
+      const outputName = goMcpBinaryName();
 
       try {
-        await execAsync('go build -o mcp-server', { cwd: workDir });
+        await execFileAsync(nativeExecutable('go'), ['build', '-o', outputName], { cwd: workDir, windowsHide: true });
       } catch (e: any) {
         throw new Error(`Go build failed: ${e.message}`);
       }
 
-      const absoluteEntryPoint = join(workDir, 'mcp-server');
+      const absoluteEntryPoint = join(workDir, outputName);
       if (!(await pathExists(absoluteEntryPoint))) {
-        throw new Error(`Go build did not produce an mcp-server executable`);
+        throw new Error(`Go build did not produce ${outputName}`);
       }
 
       spinner.succeed(chalk.green(`Successfully built custom Go MCP: ${repoName}`));
@@ -489,6 +497,42 @@ async function buildMcpProject(workDir: string, repoName: string): Promise<McpRe
     spinner.fail(chalk.red(`Failed to setup MCP: ${e.message}`));
     throw e;
   }
+}
+
+function npmExecutable(): string {
+  return process.platform === 'win32' ? 'npm.cmd' : 'npm';
+}
+
+function nativeExecutable(command: string): string {
+  return process.platform === 'win32' ? `${command}.exe` : command;
+}
+
+function goMcpBinaryName(): string {
+  return process.platform === 'win32' ? 'mcp-server.exe' : 'mcp-server';
+}
+
+function assertPackageScriptCanRun(scriptName: string, scriptCommand: string): void {
+  const issue = windowsShellCompatibilityIssue(scriptCommand);
+  if (!issue) return;
+
+  throw new Error(
+    `Package script "${scriptName}" uses ${issue}, which is not available in Windows cmd.exe. ` +
+    `The package needs a cross-platform script, a committed JavaScript entry point, or a prebuilt npm MCP package.`
+  );
+}
+
+function windowsShellCompatibilityIssue(scriptCommand: string): string | null {
+  if (process.platform !== 'win32') return null;
+
+  const shellCommand = scriptCommand.trim();
+  if (!shellCommand) return null;
+
+  const unixCommand = shellCommand.match(/(?:^|[;&|()]\s*)(cp|rm|mv|chmod|chown|ln|sed|grep|awk|cat|touch)(?=\s|$)/);
+  if (unixCommand) return `Unix shell command "${unixCommand[1]}"`;
+  if (/(?:^|[;&|()]\s*)mkdir\s+-p(?=\s|$)/.test(shellCommand)) return 'Unix shell command "mkdir -p"';
+  if (/(?:^|[;&|()]\s*)export\s+[A-Za-z_][A-Za-z0-9_]*=/.test(shellCommand)) return 'Unix shell syntax "export VAR=..."';
+
+  return null;
 }
 
 async function findNodeEntryPoint(workDir: string, pkg: PackageJsonLike): Promise<string> {

@@ -66,3 +66,5 @@ Project MCP services are recorded as `mcp <source>` in `skm.mod` and as `mcp:<so
 ```
 
 `skm promote mcp <name>` and `skm demote mcp <name>` move MCP assignments between scopes. Project MCP scope is only applied to agents with project MCP support: Codex, Claude Code, Cursor, and Antigravity CLI.
+
+For Git-sourced MCP servers, `skillpkg` runs build commands without a shell where possible. Node MCP installs use `npm install --ignore-scripts`, reuse an existing JavaScript entry point before running package lifecycle scripts, and preflight common Unix-only script commands on Windows. Go MCP builds write `mcp-server.exe` on Windows and `mcp-server` elsewhere. If a source package genuinely requires a Unix-only build script, `skillpkg` reports the incompatible script and skips that MCP instead of aborting the whole `skm install` run.

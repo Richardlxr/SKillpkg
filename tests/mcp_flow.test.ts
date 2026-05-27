@@ -109,6 +109,20 @@ describe('MCP install and scope flow', () => {
     expect(sum).toMatch(/^mcp:github\.com\/acme\/demo-mcp mcp sha256-/m);
   });
 
+  it('does not abort callers when an MCP source cannot be resolved', async () => {
+    const { installMcpService } = await import('../src/core/mcp.js');
+    mocks.getMcpConfigs.mockRejectedValue(new Error('Package script "build" uses Unix shell command "cp"'));
+
+    await expect(installMcpService('https://github.com/acme/broken-mcp.git', {
+      scope: 'project',
+      agent: 'all',
+    })).resolves.toBeUndefined();
+
+    const db = await getDb();
+    const rows = db.prepare('SELECT * FROM mcp_installations').all();
+    expect(rows).toEqual([]);
+  });
+
   it('keeps global all-agent installs global and assigned to all', async () => {
     const { installMcpService } = await import('../src/core/mcp.js');
     const antigravity = fakeAgent('antigravity', 'Antigravity 2.0 / Editor');

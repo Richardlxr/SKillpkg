@@ -5,8 +5,8 @@
  * with project/global scope so they can be promoted and re-applied to agents.
  */
 import chalk from 'chalk';
-import { exec } from 'node:child_process';
-import { dirname, join, relative, resolve } from 'node:path';
+import { execFile } from 'node:child_process';
+import { dirname, isAbsolute, join, relative, resolve } from 'node:path';
 import { promisify } from 'node:util';
 import type Database from 'better-sqlite3';
 import { getDb, genId } from '../db/index.js';
@@ -17,7 +17,7 @@ import { looksLikeMcpAppName, toMcpServerName } from '../utils/mcp_names.js';
 import { AGENT_PATHS, getDataDir } from '../utils/platform.js';
 import type { AgentAdapter, AgentType, DiscoveredMcp, InstallScope, McpRegistryEntry } from '../types/index.js';
 
-const execAsync = promisify(exec);
+const execFileAsync = promisify(execFile);
 
 type TargetAgent = AgentType | 'all';
 
@@ -971,15 +971,7 @@ export async function checkMcpStatus(): Promise<void> {
     }
 
     let available = false;
-    try {
-      const checkCmd = process.platform === 'win32'
-        ? `where ${svc.command} 2>nul`
-        : `command -v ${svc.command} 2>/dev/null`;
-      await execAsync(checkCmd);
-      available = true;
-    } catch {
-      // Command not found
-    }
+    available = await isCommandAvailable(svc.command);
 
     const status = available
       ? chalk.green('✔ available')
@@ -997,4 +989,19 @@ export async function checkMcpStatus(): Promise<void> {
     console.log(`  ${agent.displayName.padEnd(25)} ${chalk.green('✔ detected')}`);
   }
   logger.blank();
+}
+
+async function isCommandAvailable(command: string): Promise<boolean> {
+  if (!command) return false;
+  if (isAbsolute(command) || command.includes('/') || command.includes('\\')) {
+    return pathExists(command);
+  }
+
+  const checker = process.platform === 'win32' ? 'where' : 'which';
+  try {
+    await execFileAsync(checker, [command], { windowsHide: true });
+    return true;
+  } catch {
+    return false;
+  }
 }
