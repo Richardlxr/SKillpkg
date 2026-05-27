@@ -42,6 +42,8 @@ import {
   loadSumfile,
   saveSumfile,
   computeIntegrity,
+  computeMcpConfigIntegrity,
+  mcpSumSource,
   updateSumfileEntry,
   verifyIntegrity,
 } from './sumfile.js';
@@ -470,11 +472,10 @@ async function warnIfProjectLocalSkillsAreGitignored(cwd: string, sources: strin
 }
 
 async function ensureProjectGeneratedConfigGitignore(cwd: string): Promise<void> {
-  const { ensureSkillpkgGitignore, SKILLPKG_GITIGNORE_CONFIG_PATHS } = await import('../utils/gitignore.js');
+  const { ensureSkillpkgGitignore, SKILLPKG_GITIGNORE_GENERATED_PATHS } = await import('../utils/gitignore.js');
   await ensureSkillpkgGitignore(cwd, [
-    ...SKILLPKG_GITIGNORE_CONFIG_PATHS,
+    ...SKILLPKG_GITIGNORE_GENERATED_PATHS,
     ...await discoverProjectSkillSymlinkIgnores(cwd),
-    ...await discoverProjectCompatibilitySymlinkIgnores(cwd),
   ]);
 }
 
@@ -487,24 +488,6 @@ async function discoverProjectSkillSymlinkIgnores(cwd: string): Promise<string[]
     const skillDir = join(skillsDir, dir);
     if (await isSymbolicLink(skillDir)) {
       ignores.push(`.agents/skills/${dir}`);
-    }
-  }
-
-  return ignores.sort();
-}
-
-async function discoverProjectCompatibilitySymlinkIgnores(cwd: string): Promise<string[]> {
-  const ignores: string[] = [];
-
-  for (const pathConfig of Object.values(AGENT_PATHS)) {
-    if (!('symlinkDir' in pathConfig)) continue;
-
-    const symlinkDir = pathConfig.symlinkDir(cwd);
-    if (!(await isSymbolicLink(symlinkDir))) continue;
-
-    const source = projectRelativeSourceFromPath(symlinkDir, cwd);
-    if (source) {
-      ignores.push(source.replace(/^\.\//, ''));
     }
   }
 
@@ -772,6 +755,9 @@ export async function linkSkill(
 export async function tidySkills(options: { unify?: boolean } = {}): Promise<void> {
   const db = await getDb();
   const unified = options.unify ? await unifyProjectSkillDirs(db) : 0;
+  const pruned =
+    await pruneBrokenSkillRows(db, 'global', '') +
+    await pruneBrokenSkillRows(db, 'project', process.cwd());
   const globalRows = db
     .prepare("SELECT * FROM skills WHERE scope = 'global' AND project_path = ''")
     .all() as Record<string, unknown>[];
@@ -783,7 +769,12 @@ export async function tidySkills(options: { unify?: boolean } = {}): Promise<voi
     await tidySumfileForRows('global', '', globalRows) +
     await tidySumfileForRows('project', process.cwd(), projectRows);
 
-  const total = cleaned + unified;
+  const total = cleaned + unified + pruned;
+  if (pruned > 0 || unified > 0) {
+    const { handleProjectGitTracking } = await import('./git_tracking.js');
+    await handleProjectGitTracking({ refreshExisting: true });
+  }
+
   if (total > 0) {
     logger.success(`Tidied ${total} entries`);
   } else {
@@ -845,6 +836,57 @@ async function unifyProjectSkillDirs(db: Awaited<ReturnType<typeof getDb>>): Pro
   return changed;
 }
 
+async function pruneBrokenSkillRows(
+  db: Awaited<ReturnType<typeof getDb>>,
+  scope: InstallScope,
+  projectPath: string
+): Promise<number> {
+  const rows = db
+    .prepare("SELECT id, name, source_url, installed_path, unified_path FROM skills WHERE scope = ? AND project_path = ?")
+    .all(scope, projectPath) as Array<{
+      id: string;
+      name: string;
+      source_url: string;
+      installed_path: string;
+      unified_path: string | null;
+    }>;
+
+  let pruned = 0;
+  for (const row of rows) {
+    if (await pathExists(join(row.installed_path, 'SKILL.md'))) {
+      continue;
+    }
+
+    await removeBrokenNativeSkillPath(scope, projectPath, row);
+    db.prepare('DELETE FROM project_skills WHERE installed_skill_id = ?').run(row.id);
+    db.prepare('DELETE FROM mcp_configs WHERE skill_id = ?').run(row.id);
+    db.prepare('DELETE FROM skills WHERE id = ?').run(row.id);
+    logger.info(`Removed broken ${scope} skill record: ${row.name}`);
+    pruned++;
+  }
+
+  return pruned;
+}
+
+async function removeBrokenNativeSkillPath(
+  scope: InstallScope,
+  projectPath: string,
+  row: { installed_path: string; unified_path: string | null }
+): Promise<void> {
+  if (scope !== 'project') return;
+
+  const unifiedDir = unifiedProjectSkillsDir(projectPath);
+  const nativePaths = new Set<string>();
+  if (row.unified_path) nativePaths.add(row.unified_path);
+  if (isPathUnder(row.installed_path, unifiedDir)) nativePaths.add(row.installed_path);
+
+  for (const nativePath of nativePaths) {
+    if (await pathExistsNoFollow(nativePath)) {
+      await removePath(nativePath);
+    }
+  }
+}
+
 function rewriteProjectSkillPaths(
   db: Awaited<ReturnType<typeof getDb>>,
   legacyDir: string,
@@ -878,6 +920,16 @@ function rewritePathPrefix(pathValue: string, oldPrefix: string, newPrefix: stri
   return pathValue;
 }
 
+function isPathUnder(pathValue: string, parentPath: string): boolean {
+  if (pathValue === parentPath) return true;
+  for (const separator of ['/', '\\']) {
+    if (pathValue.startsWith(`${parentPath}${separator}`)) {
+      return true;
+    }
+  }
+  return false;
+}
+
 async function safeReadDir(dirPath: string): Promise<string[]> {
   try {
     const entries = await readdir(dirPath, { withFileTypes: true });
@@ -896,7 +948,11 @@ async function tidySumfileForRows(
 ): Promise<number> {
   const target = { scope, projectPath };
   const sumfile = await loadSumfile(target);
-  const installedSources = new Set(rows.map((row) => row['source_url'] as string || row['name'] as string));
+  const mcpRows = await tidyMcpRows(scope, projectPath);
+  const installedSources = new Set([
+    ...rows.map((row) => row['source_url'] as string || row['name'] as string),
+    ...mcpRows.map((row) => mcpSumSource(row.source)),
+  ]);
 
   let cleaned = 0;
   for (const source of Array.from(sumfile.keys())) {
@@ -921,11 +977,61 @@ async function tidySumfileForRows(
     }
   }
 
+  for (const row of mcpRows) {
+    const source = mcpSumSource(row.source);
+    if (!sumfile.has(source)) {
+      sumfile.set(source, {
+        source,
+        version: 'mcp',
+        integrity: computeMcpConfigIntegrity(row.source, {
+          name: row.name,
+          type: row.type,
+          command: row.command,
+          args: parseJsonValue<string[]>(row.args, []),
+          envKeys: [],
+        }),
+      });
+      logger.info(`Added missing ${scope} MCP sumfile entry: ${source}`);
+      cleaned++;
+    }
+  }
+
   if (cleaned > 0) {
     await saveSumfile(sumfile, target);
   }
 
   return cleaned;
+}
+
+async function tidyMcpRows(scope: InstallScope, projectPath: string): Promise<Array<{
+  name: string;
+  source: string;
+  type: 'stdio' | 'http' | 'sse';
+  command: string;
+  args: string;
+}>> {
+  const db = await getDb();
+  return db.prepare(`
+    SELECT name, source, type, command, args
+    FROM mcp_installations
+    WHERE scope = ? AND project_path = ?
+    ORDER BY name
+  `).all(scope, projectPath) as Array<{
+    name: string;
+    source: string;
+    type: 'stdio' | 'http' | 'sse';
+    command: string;
+    args: string;
+  }>;
+}
+
+function parseJsonValue<T>(value: string | null | undefined, fallback: T): T {
+  if (!value) return fallback;
+  try {
+    return JSON.parse(value) as T;
+  } catch {
+    return fallback;
+  }
 }
 
 // ─────────────────────────────────────────────────────────────

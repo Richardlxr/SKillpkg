@@ -1,15 +1,13 @@
 import inquirer from 'inquirer';
 import { getGitPreference } from './git_config.js';
 import { getDb } from '../db/index.js';
-import { AGENT_PATHS, unifiedProjectSkillsDir } from '../utils/platform.js';
-import { isSymbolicLink } from '../utils/fs.js';
+import { unifiedProjectSkillsDir } from '../utils/platform.js';
 import {
   ensureSkillpkgGitignore,
   hasSkillpkgGitignore,
-  SKILLPKG_GITIGNORE_CONFIG_PATHS,
+  SKILLPKG_GITIGNORE_GENERATED_PATHS,
   skillpkgGitignorePaths,
 } from '../utils/gitignore.js';
-import { projectRelativeSourceFromPath } from '../utils/path_source.js';
 import { logger } from '../utils/logger.js';
 
 type GitTrackingChoice = 'ignore' | 'track' | 'later';
@@ -29,7 +27,7 @@ export async function handleProjectGitTracking(
   }
 
   if (preference === 'track') {
-    await ensureSkillpkgGitignore(cwd, SKILLPKG_GITIGNORE_CONFIG_PATHS);
+    await ensureSkillpkgGitignore(cwd, SKILLPKG_GITIGNORE_GENERATED_PATHS);
     logger.info('Project skills are left trackable by git; project MCP config stays gitignored.');
     return;
   }
@@ -68,7 +66,7 @@ export async function handleProjectGitTracking(
     await ensureSkillpkgGitignore(cwd, await projectGitignorePaths(cwd));
     logger.info('Updated .gitignore for local project skills and MCP config.');
   } else if (choice === 'track') {
-    await ensureSkillpkgGitignore(cwd, SKILLPKG_GITIGNORE_CONFIG_PATHS);
+    await ensureSkillpkgGitignore(cwd, SKILLPKG_GITIGNORE_GENERATED_PATHS);
     logger.info('Project skills are left trackable by git; project MCP config stays gitignored.');
   }
 }
@@ -85,7 +83,6 @@ async function projectGitignorePaths(cwd: string): Promise<string[]> {
         .filter((row) => !isProjectLocalSkillSource(row, cwd))
         .map((row) => row.name)
     ),
-    ...await projectCompatibilitySymlinkIgnores(cwd),
   ];
 }
 
@@ -101,22 +98,4 @@ function isProjectLocalSkillSource(
   const unifiedDir = unifiedProjectSkillsDir(cwd).replace(/\\/g, '/');
   const installedPath = row.installed_path.replace(/\\/g, '/');
   return installedPath.startsWith(`${unifiedDir}/`);
-}
-
-async function projectCompatibilitySymlinkIgnores(cwd: string): Promise<string[]> {
-  const ignores: string[] = [];
-
-  for (const pathConfig of Object.values(AGENT_PATHS)) {
-    if (!('symlinkDir' in pathConfig)) continue;
-
-    const symlinkDir = pathConfig.symlinkDir(cwd);
-    if (!(await isSymbolicLink(symlinkDir))) continue;
-
-    const source = projectRelativeSourceFromPath(symlinkDir, cwd);
-    if (source) {
-      ignores.push(source.replace(/^\.\//, ''));
-    }
-  }
-
-  return ignores.sort();
 }

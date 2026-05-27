@@ -28,7 +28,7 @@ Generated project MCP config is local machine state and should stay out of git:
 
 The reproducible team contract is `skm.mod` plus `skm.sum`.
 
-When `skm config git auto` is active, `skillpkg` ignores downloaded or cache-linked project skills as `.agents/skills/<name>` and ignores native compatibility links as `.claude/skills` / `.cursor/skills`. Project-local skills recorded as `./.agents/skills/<name>` remain trackable so teams can commit them.
+When `skm config git auto` is active, `skillpkg` ignores downloaded or cache-linked project skills as `.agents/skills/<name>` and ignores native compatibility links as `.claude/skills` / `.cursor/skills`. Those compatibility paths are a stable cross-agent set, not based on which agents happen to be installed on the current machine, so tracked `.gitignore` files do not bounce between teammates. Project-local skills recorded as `./.agents/skills/<name>` remain trackable so teams can commit them.
 
 ## Skill Source Types
 

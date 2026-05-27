@@ -7,7 +7,6 @@ import { linkSkill } from '../src/core/commands.js';
 import { setGitPreference } from '../src/core/git_config.js';
 import { handleProjectGitTracking } from '../src/core/git_tracking.js';
 import { closeDb, getDb, genId } from '../src/db/index.js';
-import { ensureDirectorySymlink } from '../src/utils/fs.js';
 
 const mocks = vi.hoisted(() => ({
   prompt: vi.fn(),
@@ -94,6 +93,8 @@ describe('project git tracking preference', () => {
     expect(mod).toContain('/saved-link');
     const gitignore = await readFile(join(projectDir, '.gitignore'), 'utf-8');
     expect(gitignore).toContain('.mcp.json');
+    expect(gitignore).toContain('.claude/skills');
+    expect(gitignore).toContain('.cursor/skills');
     expect(gitignore).not.toContain('.agents/skills/saved-link');
   });
 
@@ -116,13 +117,13 @@ describe('project git tracking preference', () => {
 
     const gitignore = await readFile(join(projectDir, '.gitignore'), 'utf-8');
     expect(gitignore).toContain('.mcp.json');
+    expect(gitignore).toContain('.claude/skills');
+    expect(gitignore).toContain('.cursor/skills');
     expect(gitignore).not.toContain('.agents/skills/team-skill');
   });
 
-  it('preserves native compatibility symlink ignores when refreshing gitignore', async () => {
+  it('writes stable native compatibility ignores even when local symlinks are absent', async () => {
     await mkdir(join(projectDir, '.agents', 'skills'), { recursive: true });
-    await ensureDirectorySymlink(join(projectDir, '.claude', 'skills'), join(projectDir, '.agents', 'skills'));
-    await ensureDirectorySymlink(join(projectDir, '.cursor', 'skills'), join(projectDir, '.agents', 'skills'));
 
     const db = await getDb();
     const now = new Date().toISOString();

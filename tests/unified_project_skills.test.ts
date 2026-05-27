@@ -1,11 +1,13 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { lstat, mkdir, mkdtemp, readlink, rm, symlink, writeFile } from 'node:fs/promises';
+import { lstat, mkdir, mkdtemp, readFile, readlink, rm, symlink, writeFile } from 'node:fs/promises';
 import { existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { ClaudeCodeAdapter } from '../src/adapters/claude-code.js';
 import { tidySkills } from '../src/core/commands.js';
+import { saveSumfile } from '../src/core/sumfile.js';
 import { closeDb, getDb, genId } from '../src/db/index.js';
+import { upsertManagedBlock } from '../src/utils/gitignore.js';
 
 describe('unified project skills', () => {
   let root: string;
@@ -124,6 +126,67 @@ describe('unified project skills', () => {
       installed_path: unifiedSkill,
       unified_path: unifiedSkill,
     });
+  });
+
+  it('tidy prunes broken project skill records and dangling unified links', async () => {
+    const brokenLink = join(projectDir, '.agents', 'skills', 'broken-demo');
+    await mkdir(join(projectDir, '.agents', 'skills'), { recursive: true });
+    await symlink(join(root, 'missing-cache', 'broken-demo'), brokenLink, 'dir');
+    await writeFile(join(projectDir, '.gitignore'), upsertManagedBlock('', [
+      '.agents/skills/broken-demo',
+      '.agents/mcp_config.json',
+    ]));
+    await saveSumfile(new Map([
+      ['https://github.com/acme/broken-demo.git', {
+        source: 'https://github.com/acme/broken-demo.git',
+        version: '0.0.0',
+        integrity: 'sha256-broken',
+      }],
+      ['mcp:https://github.com/acme/draw-mcp.git#server', {
+        source: 'mcp:https://github.com/acme/draw-mcp.git#server',
+        version: 'mcp',
+        integrity: 'sha256-mcp',
+      }],
+    ]), { scope: 'project', projectPath: projectDir });
+
+    const db = await getDb();
+    const skillId = genId();
+    db.prepare(`
+      INSERT INTO skills
+        (id, name, source_url, source_commit, version, description, scope, project_path, alias, installed_path, unified_path, symlink_target, integrity, install_mode, is_linked, installed_at, updated_at, assigned_agents)
+      VALUES (?, 'broken-demo', 'https://github.com/acme/broken-demo.git', 'abc1234', '0.0.0', 'broken skill', 'project', ?, NULL, ?, ?, ?, '', 'symlink-cache', 1, ?, ?, 'all')
+    `).run(
+      skillId,
+      projectDir,
+      join(root, 'missing-cache', 'broken-demo'),
+      brokenLink,
+      join(root, 'missing-cache', 'broken-demo'),
+      new Date().toISOString(),
+      new Date().toISOString()
+    );
+    db.prepare(`
+      INSERT INTO project_skills (id, project_path, skill_source, version, installed_skill_id)
+      VALUES (?, ?, 'https://github.com/acme/broken-demo.git', NULL, ?)
+    `).run(genId(), projectDir, skillId);
+    db.prepare(`
+      INSERT INTO mcp_installations
+        (id, name, source, type, command, args, env, scope, project_path, assigned_agents, installed_at, updated_at)
+      VALUES (?, 'draw-mcp', 'https://github.com/acme/draw-mcp.git#server', 'stdio', 'node', '["server.js"]', '{}', 'project', ?, 'all', ?, ?)
+    `).run(genId(), projectDir, new Date().toISOString(), new Date().toISOString());
+
+    await tidySkills();
+
+    expect(existsSync(brokenLink)).toBe(false);
+    expect(db.prepare('SELECT id FROM skills WHERE id = ?').get(skillId)).toBeUndefined();
+    expect(db.prepare('SELECT id FROM project_skills WHERE installed_skill_id = ?').get(skillId)).toBeUndefined();
+    const sum = await readFile(join(projectDir, 'skm.sum'), 'utf-8');
+    expect(sum).not.toContain('broken-demo');
+    expect(sum).toContain('mcp:https://github.com/acme/draw-mcp.git#server mcp sha256-mcp');
+
+    const gitignore = await readFile(join(projectDir, '.gitignore'), 'utf-8');
+    expect(gitignore).not.toContain('.agents/skills/broken-demo');
+    expect(gitignore).toContain('.claude/skills');
+    expect(gitignore).toContain('.cursor/skills');
   });
 });
 

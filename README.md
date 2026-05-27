@@ -157,7 +157,7 @@ skm config git track
 skm config git ask
 ```
 
-When gitignore mode is active, skm manages a `.gitignore` block like this. Skill entries are per installed skill under `.agents/skills`, not the whole skills directory. Native compatibility paths are ignored as directory symlinks. Generated project MCP config stays ignored even when project skills are trackable because it can contain machine-local paths and secrets:
+When gitignore mode is active, skm manages a `.gitignore` block like this. Skill entries are per installed skill under `.agents/skills`, not the whole skills directory. Native compatibility paths are written as a stable cross-agent set, even if a given teammate does not have that agent installed locally. Generated project MCP config stays ignored even when project skills are trackable because it can contain machine-local paths and secrets:
 
 ```gitignore
 # === skillpkg managed (auto-generated, do not edit manually) ===

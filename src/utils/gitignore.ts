@@ -12,11 +12,21 @@ export const SKILLPKG_GITIGNORE_CONFIG_PATHS = [
   '.agents/mcp_config.json',
 ];
 
+export const SKILLPKG_GITIGNORE_COMPATIBILITY_PATHS = [
+  '.claude/skills',
+  '.cursor/skills',
+];
+
+export const SKILLPKG_GITIGNORE_GENERATED_PATHS = [
+  ...SKILLPKG_GITIGNORE_CONFIG_PATHS,
+  ...SKILLPKG_GITIGNORE_COMPATIBILITY_PATHS,
+];
+
 export const SKILLPKG_LEGACY_GITIGNORE_PATHS = [
   '.agents/skills/',
   '.claude/skills/',
   '.cursor/skills/',
-  ...SKILLPKG_GITIGNORE_CONFIG_PATHS,
+  ...SKILLPKG_GITIGNORE_GENERATED_PATHS,
 ];
 
 export function skillpkgGitignorePaths(skillNames: string[]): string[] {
@@ -24,13 +34,13 @@ export function skillpkgGitignorePaths(skillNames: string[]): string[] {
 
   return [
     ...skillPaths,
-    ...SKILLPKG_GITIGNORE_CONFIG_PATHS,
+    ...SKILLPKG_GITIGNORE_GENERATED_PATHS,
   ];
 }
 
 export async function ensureSkillpkgGitignore(
   cwd: string = process.cwd(),
-  paths: string[] = SKILLPKG_GITIGNORE_CONFIG_PATHS
+  paths: string[] = SKILLPKG_GITIGNORE_GENERATED_PATHS
 ): Promise<void> {
   const gitignorePath = join(cwd, '.gitignore');
   const existing = await readFileOrNull(gitignorePath) || '';
