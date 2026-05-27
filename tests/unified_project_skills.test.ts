@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { lstat, mkdir, mkdtemp, readlink, rm, writeFile } from 'node:fs/promises';
+import { lstat, mkdir, mkdtemp, readlink, rm, symlink, writeFile } from 'node:fs/promises';
 import { existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
@@ -52,6 +52,35 @@ describe('unified project skills', () => {
     expect((await lstat(join(projectDir, '.claude', 'skills'))).isSymbolicLink()).toBe(true);
     expect(resolve(join(projectDir, '.claude'), await readlink(join(projectDir, '.claude', 'skills'))))
       .toBe(join(projectDir, '.agents', 'skills'));
+  });
+
+  it('does not create project links to missing source directories', async () => {
+    const adapter = new ClaudeCodeAdapter();
+    await expect(adapter.installSkill({
+      frontmatter: { name: 'missing-demo', description: 'missing source' },
+      localPath: join(root, 'missing-source'),
+      commit: 'test',
+    }, 'project', { installMode: 'symlink-cache' })).rejects.toThrow(/Source path does not exist/);
+
+    expect(existsSync(join(projectDir, '.agents', 'skills', 'missing-demo'))).toBe(false);
+  });
+
+  it('replaces existing dangling project skill links', async () => {
+    const skillSource = join(root, 'source-skill');
+    const targetSkill = join(projectDir, '.agents', 'skills', 'demo');
+    await writeSkill(skillSource, 'demo', 'demo skill');
+    await mkdir(join(projectDir, '.agents', 'skills'), { recursive: true });
+    await symlink(join(root, 'missing-source'), targetSkill, 'dir');
+
+    const adapter = new ClaudeCodeAdapter();
+    await adapter.installSkill({
+      frontmatter: { name: 'demo', description: 'demo skill' },
+      localPath: skillSource,
+      commit: 'test',
+    }, 'project', { installMode: 'symlink-cache' });
+
+    expect((await lstat(targetSkill)).isSymbolicLink()).toBe(true);
+    expect(await readlink(targetSkill)).toBe(skillSource);
   });
 
   it('tidy --unify migrates legacy project skill directories and records unified paths', async () => {

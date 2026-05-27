@@ -135,6 +135,38 @@ function removeAssignment(existing: string | null | undefined, targetAgent: Targ
   return JSON.stringify(parsed.filter((agentName) => !toRemove.has(agentName)));
 }
 
+async function assignedAgentNamesForScope(
+  assigned: string | null | undefined,
+  scope: InstallScope
+): Promise<AgentType[]> {
+  if (assigned && assigned !== 'all') {
+    return parseJsonValue<AgentType[]>(assigned, []);
+  }
+
+  const detected = await detectAgents();
+  return detected
+    .filter((agent) => scope !== 'project' || agentSupportsProjectMcp(agent))
+    .map((agent) => agent.name);
+}
+
+async function removeMcpInstallationAssignments(
+  db: Database.Database,
+  row: ManagedMcpRow,
+  movedAgentNames: AgentType[]
+): Promise<void> {
+  const moved = new Set(movedAgentNames);
+  const remaining = (await assignedAgentNamesForScope(row.assigned_agents, row.scope))
+    .filter((agentName) => !moved.has(agentName));
+
+  if (remaining.length === 0) {
+    db.prepare('DELETE FROM mcp_installations WHERE id = ?').run(row.id);
+    return;
+  }
+
+  db.prepare('UPDATE mcp_installations SET assigned_agents = ?, updated_at = ? WHERE id = ?')
+    .run(JSON.stringify(remaining), new Date().toISOString(), row.id);
+}
+
 function formatAssigned(assigned: string | null | undefined): string {
   if (!assigned || assigned === 'all') return 'all';
   const parsed = parseJsonValue<string[]>(assigned, []);
@@ -261,38 +293,53 @@ function updateMcpAssignment(
 
 /** Install an MCP service independently and record it for future sync/promote. */
 export async function installMcpService(name: string, options: McpInstallOptions = {}): Promise<void> {
-  const { getMcpConfig, promptForMcpEnv } = await import('./mcp_registry.js');
+  const { getMcpConfigs, promptForMcpEnv } = await import('./mcp_registry.js');
   const scope = options.scope || 'global';
   const targetAgent = options.agent || 'all';
-  const config = await getMcpConfig(name);
-  const env = await promptForMcpEnv(config);
+  const configs = await getMcpConfigs(name);
   const agentsToInstall = filterAgentsForMcpScope(await resolveAdapters(targetAgent), scope);
+
+  if (configs.length === 0) {
+    logger.warn(`No MCP services resolved for "${name}".`);
+    return;
+  }
 
   if (agentsToInstall.length === 0) {
     logger.warn('No target agents found for MCP deployment.');
     return;
   }
 
-  for (const agent of agentsToInstall) {
-    try {
-      await agent.configureMCP(config, env, scope);
-    } catch (e) {
-      logger.warn(`Failed to configure MCP on ${agent.displayName}: ${(e as Error).message}`);
+  const db = await getDb();
+  let installed = 0;
+
+  for (const config of configs) {
+    const env = await promptForMcpEnv(config);
+
+    for (const agent of agentsToInstall) {
+      try {
+        await agent.configureMCP(config, env, scope);
+      } catch (e) {
+        logger.warn(`Failed to configure MCP on ${agent.displayName}: ${(e as Error).message}`);
+      }
     }
+
+    upsertMcpInstallation(
+      db,
+      config.source || name,
+      config,
+      env,
+      scope,
+      targetAgent,
+      agentsToInstall.map((agent) => agent.name)
+    );
+    installed++;
   }
 
-  const db = await getDb();
-  upsertMcpInstallation(
-    db,
-    name,
-    config,
-    env,
-    scope,
-    targetAgent,
-    agentsToInstall.map((agent) => agent.name)
-  );
-
-  logger.success(`Installed MCP "${config.name}" (${scope})`);
+  if (installed === 1) {
+    logger.success(`Installed MCP "${configs[0].name}" (${scope})`);
+  } else {
+    logger.success(`Installed ${installed} MCP service(s) (${scope})`);
+  }
   if (scope === 'project') {
     const { handleProjectGitTracking } = await import('./git_tracking.js');
     await handleProjectGitTracking();
@@ -463,6 +510,7 @@ export async function promoteMcpService(
 
   const config = rowToConfig(row);
   const env = rowToEnv(row);
+  const appliedAgents: AgentType[] = [];
 
   for (const agent of agents) {
     try {
@@ -470,14 +518,94 @@ export async function promoteMcpService(
       if (agentSupportsProjectMcp(agent)) {
         await agent.removeMCP(config.name, 'project');
       }
+      appliedAgents.push(agent.name);
     } catch (e) {
       logger.warn(`Failed to promote MCP ${row.name} on ${agent.displayName}: ${(e as Error).message}`);
     }
   }
 
-  upsertMcpInstallation(db, row.source, config, env, 'global', targetAgent, agents.map((agent) => agent.name));
-  db.prepare('DELETE FROM mcp_installations WHERE id = ?').run(row.id);
+  if (appliedAgents.length === 0) {
+    logger.warn(`MCP "${row.name}" was not promoted to any agent.`);
+    return;
+  }
+
+  upsertMcpInstallation(db, row.source, config, env, 'global', targetAgent, appliedAgents);
+  await removeMcpInstallationAssignments(db, row, appliedAgents);
   logger.success(`Promoted MCP "${config.name}" to global scope`);
+}
+
+/** Demote a global MCP to project scope and apply it to target agent(s). */
+export async function demoteMcpService(
+  name: string,
+  options: { agent?: TargetAgent } = {}
+): Promise<void> {
+  const targetAgent = options.agent || 'all';
+  const db = await getDb();
+  const projectPath = process.cwd();
+  const row = db.prepare(`
+    SELECT *
+    FROM mcp_installations
+    WHERE scope = 'global'
+      AND project_path = ''
+      AND (name = ? OR source = ? OR name = ?)
+    ORDER BY CASE WHEN name = ? THEN 0 ELSE 1 END
+    LIMIT 1
+  `).get(name, name, toMcpServerName(name), name) as ManagedMcpRow | undefined;
+
+  if (!row) {
+    const projectRow = db.prepare(`
+      SELECT id
+      FROM mcp_installations
+      WHERE scope = 'project' AND project_path = ? AND (name = ? OR source = ? OR name = ?)
+      LIMIT 1
+    `).get(projectPath, name, name, toMcpServerName(name)) as { id: string } | undefined;
+
+    if (projectRow) {
+      logger.info(`MCP "${name}" is already project-scoped`);
+      return;
+    }
+
+    logger.error(`Global MCP "${name}" is not managed by skm`);
+    return;
+  }
+
+  if (isUnsupportedManagedMcpRow(row)) {
+    logger.error(`Global MCP "${row.name}" appears to be an MCP App/HTTP server and cannot be demoted as stdio.`);
+    return;
+  }
+
+  const agents = filterAgentsForMcpScope(await resolveAdapters(targetAgent), 'project');
+  if (agents.length === 0) {
+    logger.warn('No target agents found for MCP demotion.');
+    return;
+  }
+
+  const config = rowToConfig(row);
+  const env = rowToEnv(row);
+  const appliedAgents: AgentType[] = [];
+
+  for (const agent of agents) {
+    try {
+      await agent.configureMCP(config, env, 'project');
+      await agent.removeMCP(config.name, 'global');
+      appliedAgents.push(agent.name);
+    } catch (e) {
+      logger.warn(`Failed to demote MCP ${row.name} on ${agent.displayName}: ${(e as Error).message}`);
+    }
+  }
+
+  if (appliedAgents.length === 0) {
+    logger.warn(`MCP "${row.name}" was not demoted to any agent.`);
+    return;
+  }
+
+  upsertMcpInstallation(db, row.source, config, env, 'project', targetAgent, appliedAgents);
+  await removeMcpInstallationAssignments(db, row, appliedAgents);
+
+  const { handleProjectGitTracking } = await import('./git_tracking.js');
+  await handleProjectGitTracking();
+
+  logger.success(`Demoted MCP "${config.name}" to project scope`);
 }
 
 /** List all configured MCP services */

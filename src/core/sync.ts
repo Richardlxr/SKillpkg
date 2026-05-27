@@ -11,7 +11,11 @@ import type { AgentType, InstallMode, InstallScope } from '../types/index.js';
 import { detectAgents, getAllAdapters, resolveAdapters } from '../adapters/index.js';
 import { getDb, genId } from '../db/index.js';
 import { logger } from '../utils/logger.js';
-import { unifiedProjectSkillsDir } from '../utils/platform.js';
+import { getDefaultConfig, unifiedProjectSkillsDir } from '../utils/platform.js';
+import { pathExists } from '../utils/fs.js';
+import { cloneOrPull, checkout, repoUrlToLocalPath } from '../utils/git.js';
+import { isLocalPathSource, localPathFromSource } from '../utils/path_source.js';
+import { parseSourceString } from '../parsers/index.js';
 import {
   defaultInstallModeForScope,
   installModeFromRecord,
@@ -114,12 +118,11 @@ export async function syncAgents(
         continue;
       }
 
-      // This skill is in DB but not in this agent — deploy it
-      const { parseSkillMd } = await import('../parsers/index.js');
-      const skillPath = skill['installed_path'] as string;
-      const frontmatter = await parseSkillMd(skillPath);
-
       try {
+        // This skill is in DB but not in this agent — deploy it
+        const { parseSkillMd } = await import('../parsers/index.js');
+        const skillPath = await resolveSkillSourcePath(db, skill);
+        const frontmatter = await parseSkillMd(skillPath);
         await agent.installSkill(
           {
             frontmatter: frontmatter || { name, description: skill['description'] as string || '' },
@@ -167,6 +170,79 @@ export async function syncAgents(
 
   const { syncMcpServices } = await import('./mcp.js');
   await syncMcpServices({ scope, agent: targetAgent });
+}
+
+async function resolveSkillSourcePath(
+  db: Awaited<ReturnType<typeof getDb>>,
+  skill: Record<string, unknown>
+): Promise<string> {
+  const skillName = skill['name'] as string;
+  const installedPath = skill['installed_path'] as string;
+
+  if (await hasSkillSource(installedPath)) {
+    return installedPath;
+  }
+
+  const sourceUrl = skill['source_url'] as string;
+  const recoveredPath = await recoverSkillSourcePath(sourceUrl, skill['source_commit'] as string, installedPath);
+  if (recoveredPath && await hasSkillSource(recoveredPath)) {
+    const installMode = installModeFromRecord(skill);
+    db.prepare('UPDATE skills SET installed_path = ?, symlink_target = ?, updated_at = ? WHERE id = ?')
+      .run(
+        recoveredPath,
+        isSymlinkInstallMode(installMode) ? recoveredPath : null,
+        new Date().toISOString(),
+        skill['id']
+      );
+    logger.warn(`Refreshed missing cache for skill "${skillName}" from ${sourceUrl}`);
+    return recoveredPath;
+  }
+
+  throw new Error(
+    `Skill source for "${skillName}" is missing at ${installedPath}. ` +
+    `Run skm update ${skillName} or reinstall it.`
+  );
+}
+
+async function recoverSkillSourcePath(
+  sourceUrl: string,
+  commit: string,
+  previousInstalledPath: string
+): Promise<string | null> {
+  if (!sourceUrl) return null;
+
+  if (isLocalPathSource(sourceUrl)) {
+    const localPath = localPathFromSource(sourceUrl);
+    return await hasSkillSource(localPath) ? localPath : null;
+  }
+
+  const { repoUrl, skillPath } = parseSourceString(sourceUrl);
+  const repoDir = await cloneOrPull(repoUrl, getDefaultConfig().cacheDir);
+  if (commit && commit !== 'linked' && commit !== 'unknown') {
+    await checkout(repoDir, commit);
+  }
+
+  const recoveredSkillPath = skillPath || inferSkillPathFromPreviousInstall(previousInstalledPath, repoUrl);
+  return recoveredSkillPath ? join(repoDir, recoveredSkillPath) : repoDir;
+}
+
+async function hasSkillSource(skillPath: string | undefined): Promise<boolean> {
+  return Boolean(skillPath) && await pathExists(join(skillPath as string, 'SKILL.md'));
+}
+
+function inferSkillPathFromPreviousInstall(previousInstalledPath: string, repoUrl: string): string | undefined {
+  const marker = repoUrlToLocalPath(repoUrl).split(/[\\/]+/).filter(Boolean);
+  if (marker.length === 0) return undefined;
+
+  const parts = previousInstalledPath.split(/[\\/]+/).filter(Boolean);
+  for (let index = 0; index <= parts.length - marker.length; index++) {
+    if (marker.every((part, offset) => parts[index + offset] === part)) {
+      const remainder = parts.slice(index + marker.length);
+      return remainder.length > 0 ? remainder.join('/') : undefined;
+    }
+  }
+
+  return undefined;
 }
 
 function parseAssignedAgents(value: string | undefined): string[] {
@@ -236,7 +312,13 @@ export async function promoteSkillToGlobal(
   }
 
   const { parseSkillMd } = await import('../parsers/index.js');
-  const installedPath = projectSkill['installed_path'] as string;
+  let installedPath: string;
+  try {
+    installedPath = await resolveSkillSourcePath(db, projectSkill);
+  } catch (err) {
+    logger.error((err as Error).message);
+    return;
+  }
   const frontmatter = await parseSkillMd(installedPath);
   const skillPackage = {
     frontmatter: frontmatter || {
@@ -368,7 +450,13 @@ export async function demoteSkillToProject(
     ? 'symlink-cache'
     : options.mode;
   const installMode = requestedMode || (sourceUrl.startsWith('file://') ? 'symlink-dev' : defaultInstallModeForScope('project'));
-  const installedPath = globalSkill['installed_path'] as string;
+  let installedPath: string;
+  try {
+    installedPath = await resolveSkillSourcePath(db, globalSkill);
+  } catch (err) {
+    logger.error((err as Error).message);
+    return;
+  }
   const { parseSkillMd } = await import('../parsers/index.js');
   const frontmatter = await parseSkillMd(installedPath);
   const skillPackage = {

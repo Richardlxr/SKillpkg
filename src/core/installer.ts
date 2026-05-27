@@ -22,6 +22,7 @@ import { cloneOrPull, getCommitSha, checkout } from '../utils/git.js';
 import { pathExists, isDirectory } from '../utils/fs.js';
 import { getDefaultConfig, unifiedProjectSkillsDir } from '../utils/platform.js';
 import { isLocalPathSource, localPathFromSource } from '../utils/path_source.js';
+import { promptForSearchableSelection } from '../utils/searchable_selection.js';
 import { getDb, genId } from '../db/index.js';
 import { detectAgents, getAllAdapters, resolveAdapters } from '../adapters/index.js';
 import { applyReplaceDirectives } from './replace.js';
@@ -386,38 +387,23 @@ export async function installSkill(
 }
 
 async function promptForSelectedSkills(repoDir: string, foundSkills: string[]): Promise<string[]> {
-  const { default: inquirer } = await import('inquirer');
   const choices = await buildSkillSelectionChoices(repoDir, foundSkills);
-
-  while (true) {
-    const searchAnswer = await inquirer.prompt<{ skillSearch?: string }>([{
-      type: 'input',
-      name: 'skillSearch',
-      message: `Search skills by name/path (${choices.length} found, leave blank for all):`,
-    }]);
-    const query = (searchAnswer.skillSearch || '').trim();
-    const filteredChoices = filterSkillSelectionChoices(choices, query);
-
-    if (filteredChoices.length === 0) {
-      logger.warn(`No skills matched "${query}". Try another keyword or leave blank to show all.`);
-      continue;
-    }
-
-    const answer = await inquirer.prompt<{ selectedSkills: string[] }>([{
-      type: 'checkbox',
-      name: 'selectedSkills',
-      message: query
-        ? `Found ${filteredChoices.length} of ${choices.length} skills matching "${query}". Select which ones to install:`
-        : `Found ${choices.length} skills in this repository. Select which ones to install:`,
-      choices: filteredChoices.map(({ name, value }) => ({ name, value })),
-      pageSize: Math.min(20, Math.max(filteredChoices.length, 5)),
-      validate: (ans: unknown) => Array.isArray(ans) && ans.length > 0
-        ? true
-        : 'You must select at least one skill to install',
-    }]);
-
-    return answer.selectedSkills;
-  }
+  return promptForSearchableSelection({
+    choices: choices.map((choice) => ({
+      name: choice.name,
+      value: choice.value,
+      searchable: `${choice.skillName} ${choice.subPath}`,
+    })),
+    itemLabel: 'skills',
+    queryName: 'skillSearch',
+    selectionName: 'selectedSkills',
+    searchMessage: (total) => `Search skills by name/path (${total} found, leave blank for all):`,
+    selectMessage: (matched, total, query) => query
+      ? `Found ${matched} of ${total} skills matching "${query}". Select which ones to install:`
+      : `Found ${total} skills in this repository. Select which ones to install:`,
+    noMatchesMessage: (query) => `No skills matched "${query}". Try another keyword or leave blank to show all.`,
+    includeSelectAll: true,
+  });
 }
 
 async function buildSkillSelectionChoices(repoDir: string, foundSkills: string[]): Promise<SkillSelectionChoice[]> {
@@ -437,23 +423,6 @@ async function buildSkillSelectionChoices(repoDir: string, foundSkills: string[]
       subPath,
     };
   }));
-}
-
-function filterSkillSelectionChoices(
-  choices: SkillSelectionChoice[],
-  query: string
-): SkillSelectionChoice[] {
-  const terms = query
-    .toLowerCase()
-    .split(/\s+/)
-    .filter(Boolean);
-
-  if (terms.length === 0) return choices;
-
-  return choices.filter((choice) => {
-    const searchable = `${choice.skillName} ${choice.subPath}`.toLowerCase();
-    return terms.every((term) => searchable.includes(term));
-  });
 }
 
 async function removeShadowedGlobalSkill(

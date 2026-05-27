@@ -80,7 +80,7 @@ export async function checkout(repoDir: string, ref: string): Promise<void> {
 }
 
 /** Convert a repo URL to a safe local directory name */
-function repoUrlToLocalPath(url: string): string {
+export function repoUrlToLocalPath(url: string): string {
   // https://github.com/owner/repo.git → github.com/owner/repo
   return url
     .replace(/^https?:\/\//, '')

@@ -4,6 +4,7 @@ import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { closeDb } from '../src/db/index.js';
 import { setGitPreference } from '../src/core/git_config.js';
+import { SELECT_ALL_CHOICE_VALUE } from '../src/utils/searchable_selection.js';
 
 const mocks = vi.hoisted(() => ({
   checkout: vi.fn(),
@@ -149,6 +150,31 @@ describe('multi-skill project git tracking', () => {
     const mod = await readFile(join(projectDir, 'skm.mod'), 'utf-8');
     expect(mod).toContain('skill git@example.com:org/repo.git#skills/alpha v1.2.3');
     expect(mocks.prompt).toHaveBeenCalledTimes(2);
+  });
+
+  it('can select all visible skills after searching', async () => {
+    const { installSkill } = await import('../src/core/installer.js');
+    await setGitPreference('track');
+    await writeFile(join(projectDir, 'skm.mod'), 'module demo\n');
+    mocks.prompt
+      .mockResolvedValueOnce({ skillSearch: '' })
+      .mockResolvedValueOnce({ selectedSkills: [SELECT_ALL_CHOICE_VALUE] });
+
+    await installSkill('git@example.com:org/repo.git#v1.2.3', {
+      scope: 'project',
+      noScripts: true,
+    });
+
+    const checkboxQuestion = mocks.prompt.mock.calls[1][0][0];
+    const checkboxChoices = checkboxQuestion.choices as Array<{ name: string; value: string }>;
+    expect(checkboxChoices[0]).toMatchObject({
+      name: 'Select all 2 shown',
+      value: SELECT_ALL_CHOICE_VALUE,
+    });
+
+    const mod = await readFile(join(projectDir, 'skm.mod'), 'utf-8');
+    expect(mod).toContain('skill git@example.com:org/repo.git#skills/alpha v1.2.3');
+    expect(mod).toContain('skill git@example.com:org/repo.git#skills/beta v1.2.3');
   });
 
   it('honors --no-save for selected multi-skill project installs', async () => {

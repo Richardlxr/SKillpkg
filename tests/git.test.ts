@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { cloneOrPull, getCommitSha, checkout } from '../src/utils/git.js';
+import { cloneOrPull, getCommitSha, checkout, repoUrlToLocalPath } from '../src/utils/git.js';
 import { execFile } from 'node:child_process';
 import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
@@ -13,6 +13,12 @@ describe('git utils', () => {
     expect(cloneOrPull).toBeDefined();
     expect(getCommitSha).toBeDefined();
     expect(checkout).toBeDefined();
+    expect(repoUrlToLocalPath).toBeDefined();
+  });
+
+  it('normalizes repository URLs to cache-relative paths', () => {
+    expect(repoUrlToLocalPath('https://github.com/xstongxue/best-skills.git'))
+      .toBe('github.com/xstongxue/best-skills');
   });
 
   it('should fetch a missing tag before checkout after a shallow clone', async () => {

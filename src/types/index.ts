@@ -33,6 +33,7 @@ export interface McpRegistryEntry {
   envKeys: string[];
   type?: 'stdio' | 'http' | 'sse';
   url?: string;
+  source?: string;
 }
 
 /** Skill dependency declaration in skillpkg.yaml */
