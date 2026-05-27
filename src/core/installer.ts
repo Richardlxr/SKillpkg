@@ -975,6 +975,7 @@ export async function installFromMod(options: InstallOptions = {}): Promise<void
       await installMcpService(mcp.name, {
         scope,
         agent: (options.agent || 'all') as AgentType | 'all',
+        save: false,
       });
     }
   }

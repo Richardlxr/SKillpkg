@@ -90,6 +90,9 @@ describe('project git tracking preference', () => {
     const mod = await readFile(join(projectDir, 'skm.mod'), 'utf-8');
     expect(mod).toContain('skill file://');
     expect(mod).toContain('/saved-link');
+    const gitignore = await readFile(join(projectDir, '.gitignore'), 'utf-8');
+    expect(gitignore).toContain('.mcp.json');
+    expect(gitignore).not.toContain('.agents/skills/saved-link');
   });
 });
 

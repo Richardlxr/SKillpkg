@@ -1,7 +1,7 @@
-import { basename, dirname, join, relative } from 'node:path';
+import { basename, dirname, isAbsolute, join, relative } from 'node:path';
 import { createHash } from 'node:crypto';
 import { open, readdir, readFile, rename, rm } from 'node:fs/promises';
-import type { InstallScope, SkillPackage } from '../types/index.js';
+import type { InstallScope, McpRegistryEntry, SkillPackage } from '../types/index.js';
 import { readFileOrNull, ensureDir } from '../utils/fs.js';
 import { logger } from '../utils/logger.js';
 import { getDefaultConfig } from '../utils/platform.js';
@@ -129,6 +129,44 @@ export function updateSumfileEntry(
   });
 }
 
+export function mcpSumSource(source: string): string {
+  return `mcp:${source}`;
+}
+
+export function updateMcpSumfileEntry(
+  entries: Map<string, SumEntry>,
+  source: string,
+  config: McpRegistryEntry
+): void {
+  const sumSource = mcpSumSource(source);
+  entries.set(sumSource, {
+    source: sumSource,
+    version: config.resolvedVersion || 'mcp',
+    integrity: config.integrity || computeMcpConfigIntegrity(source, config),
+  });
+}
+
+export function removeMcpSumfileEntry(
+  entries: Map<string, SumEntry>,
+  source: string
+): void {
+  entries.delete(mcpSumSource(source));
+}
+
+export function computeMcpConfigIntegrity(source: string, config: McpRegistryEntry): string {
+  const type = config.type || (config.url ? 'http' : 'stdio');
+  const portableConfig = {
+    source,
+    name: config.name,
+    type,
+    url: config.url || '',
+    command: sanitizeMcpConfigValue(config.command),
+    args: (config.args || []).map(sanitizeMcpConfigValue),
+  };
+  const hash = createHash('sha256').update(JSON.stringify(portableConfig)).digest('hex');
+  return `sha256-${hash}`;
+}
+
 /** Verify integrity of an installed skill against sumfile */
 export async function verifyIntegrity(
   source: string,
@@ -152,6 +190,11 @@ export async function verifyIntegrity(
     actual,
     reason: actual === entry.integrity ? undefined : 'mismatch',
   };
+}
+
+function sanitizeMcpConfigValue(value: string): string {
+  if (!value) return value;
+  return isAbsolute(value) ? `<absolute:${basename(value)}>` : value;
 }
 
 async function writeFileAtomic(filePath: string, content: string): Promise<void> {

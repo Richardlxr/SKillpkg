@@ -34,6 +34,8 @@ export interface McpRegistryEntry {
   type?: 'stdio' | 'http' | 'sse';
   url?: string;
   source?: string;
+  resolvedVersion?: string;
+  integrity?: string;
 }
 
 /** Skill dependency declaration in skillpkg.yaml */

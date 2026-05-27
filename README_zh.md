@@ -144,14 +144,14 @@ skm agents sync --scope project --agent claude-code
 # 自动添加 skillpkg 托管的已安装项目 skill 路径与 MCP 配置 .gitignore 区块
 skm config git auto
 
-# 让项目级 skills 可以被 git 跟踪
+# 让项目级 skills 可以被 git 跟踪，但仍忽略生成的 MCP 配置
 skm config git track
 
 # 每次项目级安装时询问
 skm config git ask
 ```
 
-启用 gitignore 模式时，skm 会维护类似下面的 `.gitignore` 区块。skill 条目按已安装的具体 skill 生成，不会忽略整个 skills 目录：
+启用 gitignore 模式时，skm 会维护类似下面的 `.gitignore` 区块。skill 条目按已安装的具体 skill 生成，不会忽略整个 skills 目录。生成的项目级 MCP 配置即使在 project skills 可被 git 跟踪时也会继续忽略，因为里面可能包含本机绝对路径和 secret：
 
 ```gitignore
 # === skillpkg managed (auto-generated, do not edit manually) ===
@@ -290,6 +290,8 @@ skm mcp sync --scope global --agent all
 
 MCP 会和 skill 一样记录 `scope`、`project_path` 与目标 Agent，可以后续提升、降级、同步或重新分配。
 
+项目级 MCP 安装默认会保存到 `skm.mod`，并以 `mcp:<source>` 条目写入 `skm.sum`。`.mcp.json`、`.codex/config.toml`、`.cursor/mcp.json`、`.agents/mcp_config.json` 等 agent MCP 配置是本机生成物，不应该提交。
+
 对于 MCP monorepo，安装器会使用和 skill 安装相同的可检索选择器，并提供 `Select all ... shown`，可以一次安装当前可见的全部 MCP 项目。每个选中的 MCP 都会用自己的 source fragment 单独记录。
 
 ## `SKILL.md` 与 `skm.mod`
@@ -358,7 +360,7 @@ skm tree
 skm cache clean
 ```
 
-全局完整性记录在 `~/.skillpkg/skm.sum`，项目级完整性记录在 `<project>/skm.sum`。项目级 Git 来源默认保存到 `<project>/skm.mod`，项目级卸载默认从 `skm.mod` 移除；如果只是临时给本机项目注入或卸载，可以加 `--no-save`。可以用 `skm config git auto|track|ask` 设置项目级安装产物是自动写入 `.gitignore`、交给 git 跟踪，还是每次询问。
+全局完整性记录在 `~/.skillpkg/skm.sum`，项目级完整性记录在 `<project>/skm.sum`。项目级 skill 和 MCP 来源默认保存到 `<project>/skm.mod`，项目级移除默认从 `skm.mod` 移除；如果只是临时给本机项目注入或卸载，可以加 `--no-save`。可以用 `skm config git auto|track|ask` 设置项目级 skill 产物是自动写入 `.gitignore`、交给 git 跟踪，还是每次询问；生成的项目级 MCP 配置会继续被 gitignore。
 
 ## 支持的 Agent
 

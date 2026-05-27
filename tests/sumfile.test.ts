@@ -5,7 +5,10 @@ import { join } from 'node:path';
 import {
   getSumfilePath,
   loadSumfile,
+  mcpSumSource,
+  removeMcpSumfileEntry,
   saveSumfile,
+  updateMcpSumfileEntry,
   verifyIntegrity,
 } from '../src/core/sumfile.js';
 import { defaultInstallScopeForCwd, getDefaultConfig } from '../src/utils/platform.js';
@@ -81,6 +84,35 @@ describe('sumfile scope handling', () => {
     } finally {
       await rm(root, { recursive: true, force: true });
     }
+  });
+
+  it('records MCP lock entries without leaking absolute paths', () => {
+    const entries = new Map();
+
+    updateMcpSumfileEntry(entries, 'github.com/acme/demo-mcp#server', {
+      name: 'demo-mcp',
+      command: 'node',
+      args: ['/Users/richard/.skillpkg/mcp-cache/demo-mcp/server/dist/index.js'],
+      envKeys: [],
+    });
+
+    const entry = entries.get(mcpSumSource('github.com/acme/demo-mcp#server'));
+    expect(entry?.source).toBe('mcp:github.com/acme/demo-mcp#server');
+    expect(entry?.version).toBe('mcp');
+    expect(entry?.integrity).toMatch(/^sha256-/);
+
+    const otherMachineEntries = new Map();
+    updateMcpSumfileEntry(otherMachineEntries, 'github.com/acme/demo-mcp#server', {
+      name: 'demo-mcp',
+      command: 'node',
+      args: ['/tmp/skm/mcp-cache/demo-mcp/server/dist/index.js'],
+      envKeys: [],
+    });
+    expect(otherMachineEntries.get(mcpSumSource('github.com/acme/demo-mcp#server'))?.integrity)
+      .toBe(entry?.integrity);
+
+    removeMcpSumfileEntry(entries, 'github.com/acme/demo-mcp#server');
+    expect(entries.size).toBe(0);
   });
 });
 

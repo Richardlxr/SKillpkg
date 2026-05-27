@@ -144,14 +144,14 @@ Project-scoped installs can be local-only or committed for a team. Configure the
 # Add a skillpkg-managed .gitignore block for installed project skill paths and MCP config
 skm config git auto
 
-# Leave project skills trackable by git
+# Leave project skills trackable by git while still ignoring generated MCP config
 skm config git track
 
 # Ask during project installs
 skm config git ask
 ```
 
-When gitignore mode is active, skm manages a `.gitignore` block like this. Skill entries are per installed skill, not the whole skills directory:
+When gitignore mode is active, skm manages a `.gitignore` block like this. Skill entries are per installed skill, not the whole skills directory. Generated project MCP config stays ignored even when project skills are trackable because it can contain machine-local paths and secrets:
 
 ```gitignore
 # === skillpkg managed (auto-generated, do not edit manually) ===
@@ -290,6 +290,8 @@ skm mcp sync --scope global --agent all
 
 MCPs are recorded with `scope`, `project_path`, and target agents, so they can be promoted, demoted, synced, or reassigned later.
 
+Project-scoped MCP installs are saved to `skm.mod` by default and locked in `skm.sum` as `mcp:<source>` entries. Agent MCP config files such as `.mcp.json`, `.codex/config.toml`, `.cursor/mcp.json`, and `.agents/mcp_config.json` are generated locally and should not be committed.
+
 For MCP monorepos, the installer uses the same searchable picker as skill installation and includes `Select all ... shown` so you can install every visible MCP project in one pass. Each selected MCP is tracked separately with its own source fragment.
 
 ## `SKILL.md` and `skm.mod`
@@ -358,7 +360,7 @@ skm tree
 skm cache clean
 ```
 
-Global integrity is recorded in `~/.skillpkg/skm.sum`; project integrity is recorded in `<project>/skm.sum`. Project Git sources are saved to `<project>/skm.mod` by default, and project uninstalls remove them from `skm.mod` by default; use `--no-save` for temporary local project injection or removal. Use `skm config git auto|track|ask` to choose whether project install outputs are gitignored, tracked, or decided per install.
+Global integrity is recorded in `~/.skillpkg/skm.sum`; project integrity is recorded in `<project>/skm.sum`. Project skill and MCP sources are saved to `<project>/skm.mod` by default, and project removals remove them from `skm.mod` by default; use `--no-save` for temporary local project injection or removal. Use `skm config git auto|track|ask` to choose whether project skill outputs are gitignored, tracked, or decided per install; generated project MCP config stays gitignored.
 
 ## Supported Agents
 

@@ -44,6 +44,36 @@ export async function saveSkillRequirement(
   logger.info(`Saved project dependency to skm.mod: ${source}${version ? ` ${version}` : ''}`);
 }
 
+export async function saveMcpRequirement(
+  source: string,
+  options: SaveSkillRequirementOptions = {}
+): Promise<void> {
+  if (options.save === false) return;
+
+  const cwd = options.cwd || process.cwd();
+  const modPath = join(cwd, 'skm.mod');
+  const exists = await pathExists(modPath);
+
+  if (!exists && !(await shouldCreateModFile(cwd, options))) {
+    return;
+  }
+
+  const content = exists
+    ? await readFileOrNull(modPath)
+    : `module ${basename(cwd) || 'project'}\n`;
+  const mod = parseModFile(content || '');
+  if (!mod.module) {
+    mod.module = basename(cwd) || 'project';
+  }
+
+  if (mod.mcps.some((mcp) => mcp.name === source)) return;
+
+  mod.mcps.push({ name: source });
+
+  await writeFileSafe(modPath, generateModFile(mod));
+  logger.info(`Saved project MCP dependency to skm.mod: ${source}`);
+}
+
 export async function removeSkillRequirement(source: string, cwd: string = process.cwd()): Promise<void> {
   const modPath = join(cwd, 'skm.mod');
   const content = await readFileOrNull(modPath);
@@ -58,6 +88,21 @@ export async function removeSkillRequirement(source: string, cwd: string = proce
 
   await writeFileSafe(modPath, generateModFile(mod));
   logger.info(`Removed project dependency from skm.mod: ${source}`);
+}
+
+export async function removeMcpRequirement(source: string, cwd: string = process.cwd()): Promise<void> {
+  const modPath = join(cwd, 'skm.mod');
+  const content = await readFileOrNull(modPath);
+  if (!content) return;
+
+  const mod = parseModFile(content);
+  const before = mod.mcps.length;
+  mod.mcps = mod.mcps.filter((mcp) => mcp.name !== source);
+
+  if (mod.mcps.length === before) return;
+
+  await writeFileSafe(modPath, generateModFile(mod));
+  logger.info(`Removed project MCP dependency from skm.mod: ${source}`);
 }
 
 async function shouldCreateModFile(_cwd: string, options: SaveSkillRequirementOptions): Promise<boolean> {

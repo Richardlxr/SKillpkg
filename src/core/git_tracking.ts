@@ -2,9 +2,9 @@ import inquirer from 'inquirer';
 import { getGitPreference } from './git_config.js';
 import { getDb } from '../db/index.js';
 import {
-  clearSkillpkgGitignore,
   ensureSkillpkgGitignore,
   hasSkillpkgGitignore,
+  SKILLPKG_GITIGNORE_CONFIG_PATHS,
   skillpkgGitignorePaths,
 } from '../utils/gitignore.js';
 import { logger } from '../utils/logger.js';
@@ -26,8 +26,8 @@ export async function handleProjectGitTracking(
   }
 
   if (preference === 'track') {
-    await clearSkillpkgGitignore(cwd);
-    logger.info('Removed skillpkg managed .gitignore block so project skills can be tracked.');
+    await ensureSkillpkgGitignore(cwd, SKILLPKG_GITIGNORE_CONFIG_PATHS);
+    logger.info('Project skills are left trackable by git; project MCP config stays gitignored.');
     return;
   }
 
@@ -65,8 +65,8 @@ export async function handleProjectGitTracking(
     await ensureSkillpkgGitignore(cwd, await projectGitignorePaths(cwd));
     logger.info('Updated .gitignore for local project skills and MCP config.');
   } else if (choice === 'track') {
-    await clearSkillpkgGitignore(cwd);
-    logger.info('Project skills are left trackable by git.');
+    await ensureSkillpkgGitignore(cwd, SKILLPKG_GITIGNORE_CONFIG_PATHS);
+    logger.info('Project skills are left trackable by git; project MCP config stays gitignored.');
   }
 }
 

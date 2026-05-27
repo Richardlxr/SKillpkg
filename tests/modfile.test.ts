@@ -3,7 +3,7 @@ import { existsSync } from 'node:fs';
 import { mkdir, mkdtemp, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { saveSkillRequirement } from '../src/core/modfile.js';
+import { removeMcpRequirement, saveMcpRequirement, saveSkillRequirement } from '../src/core/modfile.js';
 
 describe('skm.mod saving', () => {
   let root: string;
@@ -42,5 +42,48 @@ describe('skm.mod saving', () => {
     });
 
     expect(existsSync(join(projectDir, 'skm.mod'))).toBe(false);
+  });
+
+  it('saves MCP dependencies alongside skill dependencies', async () => {
+    await saveSkillRequirement('github.com/acme/demo-skill', 'v1.0.0', {
+      cwd: projectDir,
+      allowCreate: true,
+    });
+
+    await saveMcpRequirement('github.com/acme/demo-mcp#server', {
+      cwd: projectDir,
+      allowCreate: true,
+    });
+    await saveMcpRequirement('github.com/acme/demo-mcp#server', {
+      cwd: projectDir,
+      allowCreate: true,
+    });
+
+    const mod = await readFile(join(projectDir, 'skm.mod'), 'utf-8');
+    expect(mod).toBe([
+      'module project',
+      '',
+      'skill github.com/acme/demo-skill v1.0.0',
+      '',
+      'mcp github.com/acme/demo-mcp#server',
+      '',
+    ].join('\n'));
+  });
+
+  it('removes MCP dependencies without touching skills', async () => {
+    await saveSkillRequirement('github.com/acme/demo-skill', 'v1.0.0', {
+      cwd: projectDir,
+      allowCreate: true,
+    });
+    await saveMcpRequirement('@playwright/mcp', {
+      cwd: projectDir,
+      allowCreate: true,
+    });
+
+    await removeMcpRequirement('@playwright/mcp', projectDir);
+
+    const mod = await readFile(join(projectDir, 'skm.mod'), 'utf-8');
+    expect(mod).toContain('skill github.com/acme/demo-skill v1.0.0');
+    expect(mod).not.toContain('@playwright/mcp');
   });
 });

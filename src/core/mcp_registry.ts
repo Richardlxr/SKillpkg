@@ -236,8 +236,9 @@ interface McpProjectCandidate {
 
 async function buildMcpsFromSource(source: string): Promise<McpRegistryEntry[] | null> {
   const { parseSourceString } = await import('../parsers/index.js');
-  const { cloneOrPull } = await import('../utils/git.js');
+  const { cloneOrPull, getCommitSha } = await import('../utils/git.js');
   const { getDataDir } = await import('../utils/platform.js');
+  const { computeIntegrity } = await import('./sumfile.js');
   const ora = (await import('ora')).default;
   const chalk = (await import('chalk')).default;
 
@@ -252,6 +253,7 @@ async function buildMcpsFromSource(source: string): Promise<McpRegistryEntry[] |
   let fetching = true;
   try {
     const clonedDir = await cloneOrPull(repoUrl, mcpCacheBase);
+    const commit = await getCommitSha(clonedDir);
     const workDir = skillPath ? join(clonedDir, skillPath) : clonedDir;
 
     if (!(await pathExists(workDir))) {
@@ -274,6 +276,8 @@ async function buildMcpsFromSource(source: string): Promise<McpRegistryEntry[] |
       configs.push({
         ...config,
         source: sourceForMcpProject(source, clonedDir, project.path),
+        resolvedVersion: commit,
+        integrity: await computeIntegrity(project.path),
       });
     }
 

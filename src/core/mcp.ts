@@ -36,6 +36,11 @@ interface ManagedMcpRow {
 interface McpInstallOptions {
   agent?: TargetAgent;
   scope?: InstallScope;
+  save?: boolean;
+}
+
+interface McpRemoveOptions {
+  save?: boolean;
 }
 
 /** Scan agent config files for MCP services not tracked in the DB */
@@ -153,18 +158,19 @@ async function removeMcpInstallationAssignments(
   db: Database.Database,
   row: ManagedMcpRow,
   movedAgentNames: AgentType[]
-): Promise<void> {
+): Promise<boolean> {
   const moved = new Set(movedAgentNames);
   const remaining = (await assignedAgentNamesForScope(row.assigned_agents, row.scope))
     .filter((agentName) => !moved.has(agentName));
 
   if (remaining.length === 0) {
     db.prepare('DELETE FROM mcp_installations WHERE id = ?').run(row.id);
-    return;
+    return true;
   }
 
   db.prepare('UPDATE mcp_installations SET assigned_agents = ?, updated_at = ? WHERE id = ?')
     .run(JSON.stringify(remaining), new Date().toISOString(), row.id);
+  return false;
 }
 
 function formatAssigned(assigned: string | null | undefined): string {
@@ -291,6 +297,37 @@ function updateMcpAssignment(
     .run(assignedAgents, new Date().toISOString(), row.id);
 }
 
+async function updateMcpSumfile(source: string, config: McpRegistryEntry, scope: InstallScope): Promise<void> {
+  const { loadSumfile, saveSumfile, updateMcpSumfileEntry } = await import('./sumfile.js');
+  const projectPath = projectPathForScope(scope);
+  const target = { scope, projectPath };
+  const sumfile = await loadSumfile(target);
+  updateMcpSumfileEntry(sumfile, source, config);
+  await saveSumfile(sumfile, target);
+}
+
+async function removeMcpSumfile(source: string, scope: InstallScope, projectPath: string): Promise<void> {
+  const { loadSumfile, removeMcpSumfileEntry, saveSumfile } = await import('./sumfile.js');
+  const target = { scope, projectPath };
+  const sumfile = await loadSumfile(target);
+  removeMcpSumfileEntry(sumfile, source);
+  await saveSumfile(sumfile, target);
+}
+
+async function saveProjectMcpRequirement(source: string, options: { save?: boolean } = {}): Promise<void> {
+  const { saveMcpRequirement } = await import('./modfile.js');
+  await saveMcpRequirement(source, {
+    save: options.save,
+    allowCreate: true,
+  });
+}
+
+async function removeProjectMcpRequirement(source: string, options: { save?: boolean } = {}): Promise<void> {
+  if (options.save === false) return;
+  const { removeMcpRequirement } = await import('./modfile.js');
+  await removeMcpRequirement(source);
+}
+
 /** Install an MCP service independently and record it for future sync/promote. */
 export async function installMcpService(name: string, options: McpInstallOptions = {}): Promise<void> {
   const { getMcpConfigs, promptForMcpEnv } = await import('./mcp_registry.js');
@@ -313,6 +350,7 @@ export async function installMcpService(name: string, options: McpInstallOptions
   let installed = 0;
 
   for (const config of configs) {
+    const source = config.source || name;
     const env = await promptForMcpEnv(config);
 
     for (const agent of agentsToInstall) {
@@ -325,13 +363,17 @@ export async function installMcpService(name: string, options: McpInstallOptions
 
     upsertMcpInstallation(
       db,
-      config.source || name,
+      source,
       config,
       env,
       scope,
       targetAgent,
       agentsToInstall.map((agent) => agent.name)
     );
+    await updateMcpSumfile(source, config, scope);
+    if (scope === 'project') {
+      await saveProjectMcpRequirement(source, { save: options.save });
+    }
     installed++;
   }
 
@@ -361,7 +403,8 @@ export async function addMcpService(
 export async function removeMcpService(
   name: string,
   targetAgent: string = 'all',
-  scope: InstallScope = 'global'
+  scope: InstallScope = 'global',
+  options: McpRemoveOptions = {}
 ): Promise<void> {
   const db = await getDb();
   const agentsToRemove = filterAgentsForMcpScope(await resolveAdapters(targetAgent as TargetAgent), scope);
@@ -391,8 +434,10 @@ export async function removeMcpService(
 
   if (!row) return;
 
+  let rowDeleted = false;
   if (targetAgent === 'all') {
     db.prepare('DELETE FROM mcp_installations WHERE id = ?').run(row.id);
+    rowDeleted = true;
   } else {
     const removedAgentNames = agentsToRemove.map((agent) => agent.name);
     const nextAssignment = row.assigned_agents === 'all'
@@ -400,8 +445,21 @@ export async function removeMcpService(
         .map((agent) => agent.name)
         .filter((agentName) => !removedAgentNames.includes(agentName)))
       : removeAssignment(row.assigned_agents, targetAgent as TargetAgent, removedAgentNames);
-    db.prepare('UPDATE mcp_installations SET assigned_agents = ?, updated_at = ? WHERE id = ?')
-      .run(nextAssignment, new Date().toISOString(), row.id);
+    const nextAgents = parseJsonValue<string[]>(nextAssignment, []);
+    if (nextAssignment !== 'all' && nextAgents.length === 0) {
+      db.prepare('DELETE FROM mcp_installations WHERE id = ?').run(row.id);
+      rowDeleted = true;
+    } else {
+      db.prepare('UPDATE mcp_installations SET assigned_agents = ?, updated_at = ? WHERE id = ?')
+        .run(nextAssignment, new Date().toISOString(), row.id);
+    }
+  }
+
+  if (rowDeleted) {
+    await removeMcpSumfile(row.source, row.scope, row.project_path);
+    if (row.scope === 'project') {
+      await removeProjectMcpRequirement(row.source, options);
+    }
   }
 }
 
@@ -530,7 +588,12 @@ export async function promoteMcpService(
   }
 
   upsertMcpInstallation(db, row.source, config, env, 'global', targetAgent, appliedAgents);
-  await removeMcpInstallationAssignments(db, row, appliedAgents);
+  await updateMcpSumfile(row.source, config, 'global');
+  const projectRowDeleted = await removeMcpInstallationAssignments(db, row, appliedAgents);
+  if (projectRowDeleted) {
+    await removeMcpSumfile(row.source, 'project', row.project_path);
+    await removeProjectMcpRequirement(row.source);
+  }
   logger.success(`Promoted MCP "${config.name}" to global scope`);
 }
 
@@ -600,7 +663,12 @@ export async function demoteMcpService(
   }
 
   upsertMcpInstallation(db, row.source, config, env, 'project', targetAgent, appliedAgents);
-  await removeMcpInstallationAssignments(db, row, appliedAgents);
+  await updateMcpSumfile(row.source, config, 'project');
+  await saveProjectMcpRequirement(row.source);
+  const globalRowDeleted = await removeMcpInstallationAssignments(db, row, appliedAgents);
+  if (globalRowDeleted) {
+    await removeMcpSumfile(row.source, 'global', row.project_path);
+  }
 
   const { handleProjectGitTracking } = await import('./git_tracking.js');
   await handleProjectGitTracking();

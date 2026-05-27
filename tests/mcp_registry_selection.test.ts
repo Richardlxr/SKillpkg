@@ -6,12 +6,14 @@ import { SELECT_ALL_CHOICE_VALUE } from '../src/utils/searchable_selection.js';
 
 const mocks = vi.hoisted(() => ({
   cloneOrPull: vi.fn(),
+  getCommitSha: vi.fn(),
   exec: vi.fn(),
   prompt: vi.fn(),
 }));
 
 vi.mock('../src/utils/git.js', () => ({
   cloneOrPull: mocks.cloneOrPull,
+  getCommitSha: mocks.getCommitSha,
 }));
 
 vi.mock('node:child_process', () => ({
@@ -31,6 +33,7 @@ describe('MCP project selection', () => {
   beforeEach(async () => {
     vi.restoreAllMocks();
     mocks.cloneOrPull.mockReset();
+    mocks.getCommitSha.mockReset();
     mocks.exec.mockReset();
     mocks.prompt.mockReset();
 
@@ -40,6 +43,7 @@ describe('MCP project selection', () => {
     await writeNodeMcp(join(repoDir, 'beta'), '@acme/beta-mcp');
 
     mocks.cloneOrPull.mockResolvedValue(repoDir);
+    mocks.getCommitSha.mockResolvedValue('abc1234');
     mocks.exec.mockImplementation((_cmd: string, _options: unknown, callback: (error: Error | null, stdout: string, stderr: string) => void) => {
       callback(null, '', '');
     });

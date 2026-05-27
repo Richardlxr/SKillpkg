@@ -1,4 +1,4 @@
-import { mkdir, mkdtemp, rm } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -102,6 +102,11 @@ describe('MCP install and scope flow', () => {
     expect(JSON.parse(row.assigned_agents)).toEqual(['claude-code', 'codex']);
     expect(JSON.parse(row.args)).toEqual(['server.js']);
     expect(JSON.parse(row.env)).toEqual({ TOKEN: 'secret' });
+
+    const mod = await readFile(join(projectA, 'skm.mod'), 'utf-8');
+    expect(mod).toContain('mcp github.com/acme/demo-mcp');
+    const sum = await readFile(join(projectA, 'skm.sum'), 'utf-8');
+    expect(sum).toMatch(/^mcp:github\.com\/acme\/demo-mcp mcp sha256-/m);
   });
 
   it('keeps global all-agent installs global and assigned to all', async () => {
@@ -122,6 +127,26 @@ describe('MCP install and scope flow', () => {
     await expect(getMcpRow('global-mcp', 'project', projectA)).rejects.toThrow('Missing MCP row');
   });
 
+  it('honors no-save for project MCP installs while still updating the lockfile', async () => {
+    const { existsSync } = await import('node:fs');
+    const { installMcpService } = await import('../src/core/mcp.js');
+    const codex = fakeAgent('codex', 'Codex (OpenAI)');
+    const config = mcpConfig('local-only-mcp', ['server.js']);
+    mocks.resolveAdapters.mockResolvedValue([codex]);
+    mocks.getMcpConfigs.mockResolvedValue([config]);
+    mocks.promptForMcpEnv.mockResolvedValue({});
+
+    await installMcpService('github.com/acme/local-only-mcp', {
+      scope: 'project',
+      agent: 'codex',
+      save: false,
+    });
+
+    expect(existsSync(join(projectA, 'skm.mod'))).toBe(false);
+    const sum = await readFile(join(projectA, 'skm.sum'), 'utf-8');
+    expect(sum).toContain('mcp:github.com/acme/local-only-mcp mcp sha256-');
+  });
+
   it('installs every MCP config returned from a multi-project source', async () => {
     const { installMcpService } = await import('../src/core/mcp.js');
     const codex = fakeAgent('codex', 'Codex (OpenAI)');
@@ -138,6 +163,9 @@ describe('MCP install and scope flow', () => {
     expect(codex.configureMCP).toHaveBeenCalledWith(beta, {}, 'project');
     expect((await getMcpRow('alpha-mcp', 'project', projectA)).source).toBe('github.com/acme/mcps#alpha');
     expect((await getMcpRow('beta-mcp', 'project', projectA)).source).toBe('github.com/acme/mcps#beta');
+    const mod = await readFile(join(projectA, 'skm.mod'), 'utf-8');
+    expect(mod).toContain('mcp github.com/acme/mcps#alpha');
+    expect(mod).toContain('mcp github.com/acme/mcps#beta');
   });
 
   it('syncs only the current project scope and preserves other scopes', async () => {
@@ -265,6 +293,12 @@ describe('MCP install and scope flow', () => {
       assignedAgents: 'all',
       args: ['global.js'],
     });
+    await writeFile(join(projectA, 'skm.mod'), [
+      'module project-a',
+      '',
+      'mcp project-source',
+      '',
+    ].join('\n'));
     mocks.resolveAdapters.mockResolvedValueOnce([claude]);
     mocks.detectAgents.mockResolvedValue([claude, codex, cursor]);
 
@@ -273,12 +307,14 @@ describe('MCP install and scope flow', () => {
     expect(claude.removeMCP).toHaveBeenCalledWith('demo-mcp', 'project');
     expect(JSON.parse((await getMcpRow('demo-mcp', 'project', projectA)).assigned_agents))
       .toEqual(['codex', 'cursor']);
+    expect(await readFile(join(projectA, 'skm.mod'), 'utf-8')).toContain('mcp project-source');
 
     mocks.resolveAdapters.mockResolvedValueOnce([claude, codex, cursor]);
     await removeMcpService('demo-mcp', 'all', 'project');
 
     await expect(getMcpRow('demo-mcp', 'project', projectA)).rejects.toThrow('Missing MCP row');
     expect((await getMcpRow('demo-mcp', 'global', '')).source).toBe('global-source');
+    expect(await readFile(join(projectA, 'skm.mod'), 'utf-8')).not.toContain('mcp project-source');
   });
 
   it('promotes one project MCP assignment without deleting the remaining project row', async () => {
@@ -293,6 +329,12 @@ describe('MCP install and scope flow', () => {
       assignedAgents: JSON.stringify(['claude-code', 'codex']),
       args: ['project.js'],
     });
+    await writeFile(join(projectA, 'skm.mod'), [
+      'module project-a',
+      '',
+      'mcp project-source',
+      '',
+    ].join('\n'));
     mocks.resolveAdapters.mockResolvedValue([claude]);
 
     await promoteMcpService('demo-mcp', { agent: 'claude-code' });
@@ -307,6 +349,34 @@ describe('MCP install and scope flow', () => {
       .toEqual(['codex']);
     expect(JSON.parse((await getMcpRow('demo-mcp', 'global', '')).assigned_agents))
       .toEqual(['claude-code']);
+    expect(await readFile(join(projectA, 'skm.mod'), 'utf-8')).toContain('mcp project-source');
+  });
+
+  it('removes the project MCP manifest entry when promoting the last assignment', async () => {
+    const { promoteMcpService } = await import('../src/core/mcp.js');
+    const codex = fakeAgent('codex', 'Codex (OpenAI)');
+    await seedMcp({
+      name: 'demo-mcp',
+      source: 'project-source',
+      scope: 'project',
+      projectPath: projectA,
+      assignedAgents: JSON.stringify(['codex']),
+      args: ['project.js'],
+    });
+    await writeFile(join(projectA, 'skm.mod'), [
+      'module project-a',
+      '',
+      'mcp project-source',
+      '',
+    ].join('\n'));
+    mocks.resolveAdapters.mockResolvedValue([codex]);
+
+    await promoteMcpService('demo-mcp', { agent: 'codex' });
+
+    await expect(getMcpRow('demo-mcp', 'project', projectA)).rejects.toThrow('Missing MCP row');
+    expect(await readFile(join(projectA, 'skm.mod'), 'utf-8')).not.toContain('mcp project-source');
+    const globalSum = await readFile(join(root, 'data', 'skm.sum'), 'utf-8');
+    expect(globalSum).toContain('mcp:project-source mcp sha256-');
   });
 
   it('demotes global MCPs only to project-capable agents and keeps unsupported agents global', async () => {
@@ -346,6 +416,8 @@ describe('MCP install and scope flow', () => {
     expect(JSON.parse((await getMcpRow('demo-mcp', 'global', '')).assigned_agents))
       .toEqual(['antigravity']);
     expect(mocks.handleProjectGitTracking).toHaveBeenCalledTimes(1);
+    expect(await readFile(join(projectA, 'skm.mod'), 'utf-8')).toContain('mcp global-source');
+    expect(await readFile(join(projectA, 'skm.sum'), 'utf-8')).toContain('mcp:global-source mcp sha256-');
   });
 });
 

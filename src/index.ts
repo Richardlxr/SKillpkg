@@ -317,10 +317,13 @@ mcpCmd
   .description('Install an MCP service independently')
   .option('--scope <scope>', 'Installation scope: global or project', 'global')
   .option('--agent <agent>', 'Target agent (or "all")', 'all')
+  .option('--save', 'Save project MCP install to skm.mod')
+  .option('--no-save', 'Do not save project MCP install to skm.mod')
   .action(async (name: string, opts: Record<string, unknown>) => {
     await addMcpService(name, {
       scope: opts['scope'] as InstallScope,
       agent: opts['agent'] as AgentType | 'all',
+      save: opts['save'] as boolean | undefined,
     });
   });
 
@@ -330,11 +333,14 @@ mcpCmd
   .description('Remove an independently installed MCP service')
   .option('--scope <scope>', 'Scope to remove from', 'global')
   .option('--agent <agent>', 'Target agent (or "all")', 'all')
+  .option('--save', 'Remove project MCP install from skm.mod')
+  .option('--no-save', 'Do not remove project MCP install from skm.mod')
   .action(async (name: string, opts: Record<string, unknown>) => {
     await removeMcpService(
       name,
       opts['agent'] as string,
-      (opts['scope'] as InstallScope) || 'global'
+      (opts['scope'] as InstallScope) || 'global',
+      { save: opts['save'] as boolean | undefined }
     );
   });
 
