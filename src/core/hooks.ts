@@ -3,14 +3,20 @@
  *
  * Security: scripts run in the skill directory with limited env.
  */
-import { exec } from 'node:child_process';
+import { exec, execFile } from 'node:child_process';
 import { platform } from 'node:os';
 import { promisify } from 'node:util';
 import { join } from 'node:path';
 import { pathExists } from '../utils/fs.js';
 import { logger } from '../utils/logger.js';
+import { windowsShellCompatibilityIssue } from '../utils/shell.js';
 
 const execAsync = promisify(exec);
+const execFileAsync = promisify(execFile);
+
+type HookCommand =
+  | { display: string; shell: true; command: string }
+  | { display: string; shell?: false; command: string; args: string[] };
 
 /**
  * Run a setup command or setup.sh if present.
@@ -22,36 +28,39 @@ export async function runSetup(
   cwd: string,
   skillName: string
 ): Promise<boolean> {
-  let cmdToRun = setupCommand;
+  const hook = await resolveSetupHook(setupCommand, cwd);
 
-  if (!cmdToRun) {
-    if (platform() === 'win32' && await pathExists(join(cwd, 'setup.ps1'))) {
-      cmdToRun = 'powershell.exe -NoProfile -ExecutionPolicy Bypass -File setup.ps1';
-    } else if (platform() === 'win32' && await pathExists(join(cwd, 'setup.cmd'))) {
-      cmdToRun = 'setup.cmd';
-    } else if (platform() === 'win32' && await pathExists(join(cwd, 'setup.bat'))) {
-      cmdToRun = 'setup.bat';
-    } else if (await pathExists(join(cwd, 'setup.sh'))) {
-      cmdToRun = 'bash setup.sh';
-    } else {
-      return true;
-    }
+  if (!hook) {
+    return true;
+  }
+
+  const issue = hook.shell ? windowsShellCompatibilityIssue(hook.command) : null;
+  if (issue) {
+    logger.error(
+      `Setup failed for "${skillName}": setup_command uses ${issue}, which is not available in Windows cmd.exe. ` +
+      `Use setup.ps1/setup.cmd/setup.bat for Windows or make setup_command cross-platform.`
+    );
+    return false;
   }
 
   logger.skill(skillName, `Running setup...`);
   logger.debug(`  cwd: ${cwd}`);
-  logger.debug(`  cmd: ${cmdToRun}`);
+  logger.debug(`  cmd: ${hook.display}`);
 
   try {
-    const { stdout, stderr } = await execAsync(cmdToRun, {
+    const execOptions = {
       cwd,
-      timeout: 120_000,   // 120 second timeout
+      timeout: 120_000,
+      windowsHide: true,
       env: {
         ...process.env,
         SKM_SKILL_NAME: skillName,
         SKM_SKILL_DIR: cwd,
       },
-    });
+    };
+    const { stdout, stderr } = hook.shell
+      ? await execAsync(hook.command, execOptions)
+      : await execFileAsync(hook.command, hook.args, execOptions);
 
     if (stdout.trim()) {
       for (const line of stdout.trim().split('\n')) {
@@ -70,4 +79,48 @@ export async function runSetup(
     logger.error(`Setup failed for "${skillName}": ${msg}`);
     return false;
   }
+}
+
+async function resolveSetupHook(
+  setupCommand: string | undefined,
+  cwd: string
+): Promise<HookCommand | null> {
+  if (setupCommand) {
+    return { display: setupCommand, shell: true, command: setupCommand };
+  }
+
+  const currentPlatform = platform();
+  if (currentPlatform === 'win32' && await pathExists(join(cwd, 'setup.ps1'))) {
+    return {
+      display: 'powershell.exe -NoProfile -ExecutionPolicy Bypass -File setup.ps1',
+      command: 'powershell.exe',
+      args: ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', 'setup.ps1'],
+    };
+  }
+
+  if (currentPlatform === 'win32' && await pathExists(join(cwd, 'setup.cmd'))) {
+    return {
+      display: 'cmd.exe /d /s /c setup.cmd',
+      command: 'cmd.exe',
+      args: ['/d', '/s', '/c', 'setup.cmd'],
+    };
+  }
+
+  if (currentPlatform === 'win32' && await pathExists(join(cwd, 'setup.bat'))) {
+    return {
+      display: 'cmd.exe /d /s /c setup.bat',
+      command: 'cmd.exe',
+      args: ['/d', '/s', '/c', 'setup.bat'],
+    };
+  }
+
+  if (await pathExists(join(cwd, 'setup.sh'))) {
+    return {
+      display: 'bash setup.sh',
+      command: 'bash',
+      args: ['setup.sh'],
+    };
+  }
+
+  return null;
 }

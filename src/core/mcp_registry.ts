@@ -54,6 +54,7 @@ export const MCP_REGISTRY: Record<string, McpRegistryEntry> = {
 import { join, relative } from 'node:path';
 import { createHash } from 'node:crypto';
 import { pathExists, readJsonFile } from '../utils/fs.js';
+import { windowsShellCompatibilityIssue } from '../utils/shell.js';
 
 /**
  * Resolve an MCP config by name or Git URL.
@@ -519,20 +520,6 @@ function assertPackageScriptCanRun(scriptName: string, scriptCommand: string): v
     `Package script "${scriptName}" uses ${issue}, which is not available in Windows cmd.exe. ` +
     `The package needs a cross-platform script, a committed JavaScript entry point, or a prebuilt npm MCP package.`
   );
-}
-
-function windowsShellCompatibilityIssue(scriptCommand: string): string | null {
-  if (process.platform !== 'win32') return null;
-
-  const shellCommand = scriptCommand.trim();
-  if (!shellCommand) return null;
-
-  const unixCommand = shellCommand.match(/(?:^|[;&|()]\s*)(cp|rm|mv|chmod|chown|ln|sed|grep|awk|cat|touch)(?=\s|$)/);
-  if (unixCommand) return `Unix shell command "${unixCommand[1]}"`;
-  if (/(?:^|[;&|()]\s*)mkdir\s+-p(?=\s|$)/.test(shellCommand)) return 'Unix shell command "mkdir -p"';
-  if (/(?:^|[;&|()]\s*)export\s+[A-Za-z_][A-Za-z0-9_]*=/.test(shellCommand)) return 'Unix shell syntax "export VAR=..."';
-
-  return null;
 }
 
 async function findNodeEntryPoint(workDir: string, pkg: PackageJsonLike): Promise<string> {
