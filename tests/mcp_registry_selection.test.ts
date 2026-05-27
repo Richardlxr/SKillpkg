@@ -96,13 +96,50 @@ describe('MCP project selection', () => {
     expect(checkboxQuestion.choices).toHaveLength(1);
     expect(checkboxQuestion.choices[0].name).toContain('@acme/beta-mcp');
   });
+
+  it('does not run package lifecycle scripts when an entry point already exists', async () => {
+    const { getMcpConfigs } = await import('../src/core/mcp_registry.js');
+    const directRepo = join(root, 'direct-repo');
+    await writeNodeMcp(directRepo, '@drawio/mcp', {
+      scripts: {
+        prepack: 'cp ../shared/xml-reference.md src/xml-reference.md',
+      },
+      main: 'src/index.js',
+    });
+    await writeFile(join(directRepo, 'src', 'index.js'), 'console.log("mcp");\n');
+    mocks.cloneOrPull.mockResolvedValue(directRepo);
+    mocks.exec.mockImplementation((cmd: string, _options: unknown, callback: (error: Error | null, stdout: string, stderr: string) => void) => {
+      if (cmd.includes('prepack')) {
+        callback(new Error('cp is not recognized'), '', 'cp is not recognized');
+        return;
+      }
+      callback(null, '', '');
+    });
+
+    const configs = await getMcpConfigs('https://github.com/jgraph/drawio-mcp.git');
+
+    expect(configs).toHaveLength(1);
+    expect(configs[0]).toMatchObject({
+      name: 'drawio-mcp',
+      command: 'node',
+      args: [join(directRepo, 'src', 'index.js')],
+    });
+    expect(mocks.exec.mock.calls.map((call) => call[0])).toEqual(['npm install --ignore-scripts']);
+  });
 });
 
-async function writeNodeMcp(path: string, name: string): Promise<void> {
+async function writeNodeMcp(
+  path: string,
+  name: string,
+  options: { main?: string; scripts?: Record<string, string> } = {}
+): Promise<void> {
   await mkdir(path, { recursive: true });
+  const main = options.main || 'index.js';
   await writeFile(join(path, 'package.json'), JSON.stringify({
     name,
-    main: 'index.js',
+    main,
+    scripts: options.scripts,
   }, null, 2));
-  await writeFile(join(path, 'index.js'), 'console.log("mcp");\n');
+  await mkdir(join(path, 'src'), { recursive: true });
+  await writeFile(join(path, main), 'console.log("mcp");\n');
 }

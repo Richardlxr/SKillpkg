@@ -511,7 +511,13 @@ export async function installMcpService(name: string, options: McpInstallOptions
   const { getMcpConfigs, promptForMcpEnv } = await import('./mcp_registry.js');
   const scope = options.scope || 'global';
   const targetAgent = options.agent || 'all';
-  const configs = await getMcpConfigs(name);
+  let configs: McpRegistryEntry[];
+  try {
+    configs = await getMcpConfigs(name);
+  } catch (err) {
+    logger.error(`Failed to resolve MCP "${name}": ${(err as Error).message}`);
+    return;
+  }
   const agentsToInstall = filterAgentsForMcpScope(await resolveAdapters(targetAgent), scope);
 
   if (configs.length === 0) {

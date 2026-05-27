@@ -405,25 +405,31 @@ async function buildMcpProject(workDir: string, repoName: string): Promise<McpRe
       spinner.text = chalk.blue('Installing Node.js dependencies...');
       await execAsync('npm install --ignore-scripts', { cwd: workDir });
 
-      const buildScripts = ['build', 'compile', 'prepare', 'prepack', 'prestart'];
-      for (const script of buildScripts) {
+      for (const script of ['build', 'compile']) {
         if (pkg?.scripts?.[script]) {
           spinner.text = chalk.blue(`Running ${script} script...`);
           await execAsync(`npm run ${script}`, { cwd: workDir });
-          if (script === 'build' || script === 'compile') break;
+          break;
         }
       }
 
-      const entryPoint = await findNodeEntryPoint(workDir, pkg);
+      let entryPoint = await findNodeEntryPoint(workDir, pkg);
       if (!entryPoint) {
-        throw new Error('Could not find bin, main, or dist/index.js in package.json');
+        for (const script of ['prepare', 'prepack', 'prestart']) {
+          if (!pkg?.scripts?.[script]) continue;
+
+          spinner.text = chalk.blue(`Running ${script} script...`);
+          await execAsync(`npm run ${script}`, { cwd: workDir });
+          entryPoint = await findNodeEntryPoint(workDir, pkg);
+          if (entryPoint) break;
+        }
+      }
+
+      if (!entryPoint) {
+        throw new Error('Could not find an existing bin, main, dist/index.js, build/index.js, index.js, or src/index.js entry point');
       }
 
       const absoluteEntryPoint = join(workDir, entryPoint);
-      if (!(await pathExists(absoluteEntryPoint))) {
-        throw new Error(`Resolved entry point does not exist: ${absoluteEntryPoint}`);
-      }
-
       spinner.succeed(chalk.green(`Successfully built custom Node.js MCP: ${pkg.name || repoName}`));
       return {
         name: toMcpServerName(pkg.name || repoName),
@@ -486,17 +492,20 @@ async function buildMcpProject(workDir: string, repoName: string): Promise<McpRe
 }
 
 async function findNodeEntryPoint(workDir: string, pkg: PackageJsonLike): Promise<string> {
+  const candidates: string[] = [];
   if (pkg?.bin) {
-    return typeof pkg.bin === 'string' ? pkg.bin : Object.values(pkg.bin)[0] as string;
+    candidates.push(...(typeof pkg.bin === 'string' ? [pkg.bin] : Object.values(pkg.bin) as string[]));
   }
 
   if (pkg?.main) {
-    return pkg.main;
+    candidates.push(pkg.main);
   }
 
-  if (await pathExists(join(workDir, 'dist', 'index.js'))) return 'dist/index.js';
-  if (await pathExists(join(workDir, 'build', 'index.js'))) return 'build/index.js';
-  if (await pathExists(join(workDir, 'index.js'))) return 'index.js';
+  candidates.push('dist/index.js', 'build/index.js', 'index.js', 'src/index.js');
+  for (const candidate of candidates) {
+    if (candidate && await pathExists(join(workDir, candidate))) return candidate;
+  }
+
   return '';
 }
 
