@@ -122,6 +122,7 @@ describe('project git tracking preference', () => {
   it('preserves native compatibility symlink ignores when refreshing gitignore', async () => {
     await mkdir(join(projectDir, '.agents', 'skills'), { recursive: true });
     await ensureDirectorySymlink(join(projectDir, '.claude', 'skills'), join(projectDir, '.agents', 'skills'));
+    await ensureDirectorySymlink(join(projectDir, '.cursor', 'skills'), join(projectDir, '.agents', 'skills'));
 
     const db = await getDb();
     const now = new Date().toISOString();
@@ -145,6 +146,9 @@ describe('project git tracking preference', () => {
     const gitignore = await readFile(join(projectDir, '.gitignore'), 'utf-8');
     expect(gitignore).toContain('.agents/skills/remote-demo');
     expect(gitignore).toContain('.claude/skills');
+    expect(gitignore).toContain('.cursor/skills');
+    expect(gitignore).not.toContain('.claude/skills/remote-demo');
+    expect(gitignore).not.toContain('.cursor/skills/remote-demo');
   });
 });
 

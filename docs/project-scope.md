@@ -28,6 +28,8 @@ Generated project MCP config is local machine state and should stay out of git:
 
 The reproducible team contract is `skm.mod` plus `skm.sum`.
 
+When `skm config git auto` is active, `skillpkg` ignores downloaded or cache-linked project skills as `.agents/skills/<name>` and ignores native compatibility links as `.claude/skills` / `.cursor/skills`. Project-local skills recorded as `./.agents/skills/<name>` remain trackable so teams can commit them.
+
 ## Skill Source Types
 
 Remote Git skills are recorded in `skm.mod` as `skill <repo[#path]>` and locked in `skm.sum` by content hash. Project installs use the project scope and can be restored with `skm install`.

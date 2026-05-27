@@ -13,8 +13,8 @@ describe('skillpkg gitignore management', () => {
     expect(first).toContain('node_modules/');
     expect(first).toContain('# === skillpkg managed');
     expect(first).toContain('.agents/skills/demo');
-    expect(first).toContain('.claude/skills/demo');
-    expect(first).toContain('.cursor/skills/demo');
+    expect(first).not.toContain('.claude/skills/demo');
+    expect(first).not.toContain('.cursor/skills/demo');
     expect(first.split('\n')).not.toContain('.agents/skills/');
     expect(first).not.toContain('.opencode');
     expect(first).not.toContain('.hermes');

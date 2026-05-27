@@ -20,11 +20,7 @@ export const SKILLPKG_LEGACY_GITIGNORE_PATHS = [
 ];
 
 export function skillpkgGitignorePaths(skillNames: string[]): string[] {
-  const skillPaths = skillNames.flatMap((skillName) => [
-    `.agents/skills/${skillName}`,
-    `.claude/skills/${skillName}`,
-    `.cursor/skills/${skillName}`,
-  ]);
+  const skillPaths = skillNames.map((skillName) => `.agents/skills/${skillName}`);
 
   return [
     ...skillPaths,
