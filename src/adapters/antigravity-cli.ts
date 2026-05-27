@@ -36,7 +36,7 @@ export class AntigravityCliAdapter extends BaseAdapter {
     const serverName = this.mcpServerName(mcp.name);
 
     this.removeMcpServerEntries(mcpServers, mcp.name);
-    mcpServers[serverName] = mcp.type === 'http' && mcp.url
+    mcpServers[serverName] = isRemoteMcp(mcp)
       ? {
         serverUrl: mcp.url,
       }
@@ -71,4 +71,8 @@ export class AntigravityCliAdapter extends BaseAdapter {
       { path: AGENT_PATHS['antigravity-cli'].mcpConfig('project') },
     ]);
   }
+}
+
+function isRemoteMcp(mcp: McpRegistryEntry): mcp is McpRegistryEntry & { type: 'http' | 'sse'; url: string } {
+  return (mcp.type === 'http' || mcp.type === 'sse') && Boolean(mcp.url);
 }

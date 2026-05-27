@@ -72,7 +72,7 @@ export async function getMcpConfig(name: string): Promise<McpRegistryEntry> {
   if (isRemoteMcpEndpoint(name)) {
     return {
       name: nameFromRemoteMcpUrl(name),
-      type: 'http',
+      type: remoteMcpTransport(name) || 'http',
       url: name,
       command: '',
       args: [],
@@ -124,22 +124,21 @@ export function looksLikeMcpAppPackageName(name: string): boolean {
 }
 
 export function isRemoteMcpEndpoint(source: string): boolean {
+  return remoteMcpTransport(source) !== null;
+}
+
+export function remoteMcpTransport(source: string): 'http' | 'sse' | null {
   try {
     const url = new URL(source);
-    if (!['http:', 'https:'].includes(url.protocol)) return false;
-    if (isLikelyGitHostUrl(url)) return false;
+    if (!['http:', 'https:'].includes(url.protocol)) return null;
+    if (isLikelyGitHostUrl(url)) return null;
 
     const path = url.pathname.replace(/\/+$/, '').toLowerCase();
-    return (
-      path === '/mcp' ||
-      path.endsWith('/mcp') ||
-      path === '/sse' ||
-      path.endsWith('/sse') ||
-      url.hostname === 'localhost' ||
-      url.hostname === '127.0.0.1'
-    );
+    if (path === '/sse' || path.endsWith('/sse')) return 'sse';
+    if (path === '/mcp' || path.endsWith('/mcp')) return 'http';
+    return 'http';
   } catch {
-    return false;
+    return null;
   }
 }
 

@@ -158,7 +158,7 @@ function buildCodexMcpBlock(mcp: McpRegistryEntry, env: Record<string, string>):
     'enabled = true',
   ];
 
-  if (mcp.type === 'http' && mcp.url) {
+  if ((mcp.type === 'http' || mcp.type === 'sse') && mcp.url) {
     lines.push(`url = ${tomlString(mcp.url)}`);
     return lines.join('\n');
   }

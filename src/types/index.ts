@@ -31,7 +31,7 @@ export interface McpRegistryEntry {
   command: string;
   args: string[];
   envKeys: string[];
-  type?: 'stdio' | 'http';
+  type?: 'stdio' | 'http' | 'sse';
   url?: string;
 }
 

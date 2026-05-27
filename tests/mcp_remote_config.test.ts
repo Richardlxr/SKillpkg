@@ -65,6 +65,40 @@ describe('remote MCP config', () => {
       'draw-io': { serverUrl: 'https://mcp.draw.io/mcp' },
     });
   });
+
+  it('preserves legacy SSE transport where agent configs support a transport type', async () => {
+    const mcp: McpRegistryEntry = {
+      name: 'asana-com',
+      type: 'sse',
+      url: 'https://mcp.asana.com/sse',
+      command: '',
+      args: [],
+      envKeys: [],
+    };
+
+    await new CodexAdapter().configureMCP(mcp, {}, 'project');
+    await new ClaudeCodeAdapter().configureMCP(mcp, {}, 'project');
+    await new CursorAdapter().configureMCP(mcp, {}, 'project');
+    await new AntigravityCliAdapter().configureMCP(mcp, {}, 'project');
+
+    expect(await readFile(join(projectDir, '.codex', 'config.toml'), 'utf-8'))
+      .toContain('url = "https://mcp.asana.com/sse"');
+
+    const claude = await readJson(join(projectDir, '.mcp.json'));
+    expect(claude['mcpServers']).toMatchObject({
+      'asana-com': { type: 'sse', url: 'https://mcp.asana.com/sse' },
+    });
+
+    const cursor = await readJson(join(projectDir, '.cursor', 'mcp.json'));
+    expect(cursor['mcpServers']).toMatchObject({
+      'asana-com': { type: 'sse', url: 'https://mcp.asana.com/sse' },
+    });
+
+    const antigravity = await readJson(join(projectDir, '.agents', 'mcp_config.json'));
+    expect(antigravity['mcpServers']).toMatchObject({
+      'asana-com': { serverUrl: 'https://mcp.asana.com/sse' },
+    });
+  });
 });
 
 async function readJson(filePath: string): Promise<Record<string, unknown>> {

@@ -30,7 +30,7 @@ export class AntigravityAdapter extends BaseAdapter {
     const serverName = this.mcpServerName(mcp.name);
 
     this.removeMcpServerEntries(mcpServers, mcp.name);
-    mcpServers[serverName] = mcp.type === 'http' && mcp.url
+    mcpServers[serverName] = isRemoteMcp(mcp)
       ? {
         serverUrl: mcp.url,
       }
@@ -62,4 +62,8 @@ export class AntigravityAdapter extends BaseAdapter {
   async listConfiguredMCPs(): Promise<DiscoveredMcp[]> {
     return this.parseJsonMcpConfig(AGENT_PATHS.antigravity.mcpConfig());
   }
+}
+
+function isRemoteMcp(mcp: McpRegistryEntry): mcp is McpRegistryEntry & { type: 'http' | 'sse'; url: string } {
+  return (mcp.type === 'http' || mcp.type === 'sse') && Boolean(mcp.url);
 }

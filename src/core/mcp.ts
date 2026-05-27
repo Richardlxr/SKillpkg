@@ -69,10 +69,10 @@ function parseJsonValue<T>(value: string | null | undefined, fallback: T): T {
 }
 
 function rowToConfig(row: ManagedMcpRow): McpRegistryEntry {
-  if (row.type === 'http') {
+  if (row.type === 'http' || row.type === 'sse') {
     return {
       name: row.name,
-      type: 'http',
+      type: row.type,
       url: row.command,
       command: '',
       args: [],
@@ -94,7 +94,7 @@ function rowToEnv(row: ManagedMcpRow): Record<string, string> {
 }
 
 function isUnsupportedManagedMcpRow(row: ManagedMcpRow): boolean {
-  if (row.type === 'http') return false;
+  if (row.type === 'http' || row.type === 'sse') return false;
 
   const references = [
     row.name,
@@ -180,7 +180,7 @@ function upsertMcpInstallation(
   const now = new Date().toISOString();
   const projectPath = projectPathForScope(scope);
   const type = config.type || (config.url ? 'http' : 'stdio');
-  const command = type === 'http' ? (config.url || config.command) : config.command;
+  const command = type === 'http' || type === 'sse' ? (config.url || config.command) : config.command;
   const existing = db.prepare(`
     SELECT id, assigned_agents
     FROM mcp_installations
@@ -585,7 +585,7 @@ export async function checkMcpStatus(): Promise<void> {
   logger.blank();
 
   for (const svc of uniqueServices) {
-    if (svc.type === 'http' || /^https?:\/\//i.test(svc.command)) {
+    if (svc.type === 'http' || svc.type === 'sse' || /^https?:\/\//i.test(svc.command)) {
       console.log(`  ${svc.name.padEnd(25)} ${chalk.green('remote')}  ${chalk.gray(`(${svc.command})`)}`);
       continue;
     }

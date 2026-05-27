@@ -194,6 +194,35 @@ describe('MCP install and scope flow', () => {
     );
   });
 
+  it('syncs managed SSE endpoint rows as remote MCP configs', async () => {
+    const { syncMcpServices } = await import('../src/core/mcp.js');
+    const claude = fakeAgent('claude-code', 'Claude Code');
+    mocks.resolveAdapters.mockResolvedValue([claude]);
+    await seedMcp({
+      name: 'asana-com',
+      source: 'https://mcp.asana.com/sse',
+      type: 'sse',
+      command: 'https://mcp.asana.com/sse',
+      scope: 'project',
+      projectPath: projectA,
+      assignedAgents: JSON.stringify(['claude-code']),
+      args: [],
+    });
+
+    await syncMcpServices({ scope: 'project', agent: 'claude-code' });
+
+    expect(claude.configureMCP).toHaveBeenCalledWith(
+      expect.objectContaining({
+        name: 'asana-com',
+        type: 'sse',
+        url: 'https://mcp.asana.com/sse',
+        command: '',
+      }),
+      {},
+      'project'
+    );
+  });
+
   it('removes project MCP assignments without deleting matching global records', async () => {
     const { removeMcpService } = await import('../src/core/mcp.js');
     const claude = fakeAgent('claude-code', 'Claude Code');
@@ -259,6 +288,8 @@ function mcpConfig(name: string, args: string[]): McpRegistryEntry {
 async function seedMcp(options: {
   name: string;
   source: string;
+  type?: 'stdio' | 'http' | 'sse';
+  command?: string;
   scope: InstallScope;
   projectPath: string;
   assignedAgents: string;
@@ -269,11 +300,13 @@ async function seedMcp(options: {
   db.prepare(`
     INSERT INTO mcp_installations
       (id, name, source, type, command, args, env, scope, project_path, assigned_agents, installed_at, updated_at)
-    VALUES (?, ?, ?, 'stdio', 'node', ?, '{}', ?, ?, ?, ?, ?)
+    VALUES (?, ?, ?, ?, ?, ?, '{}', ?, ?, ?, ?, ?)
   `).run(
     genId(),
     options.name,
     options.source,
+    options.type || 'stdio',
+    options.command || 'node',
     JSON.stringify(options.args),
     options.scope,
     options.projectPath,

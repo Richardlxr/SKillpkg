@@ -5,6 +5,7 @@ import {
   isUnsupportedMcpAppPackage,
   looksLikeMcpAppPackageName,
   parsePythonProjectMetadata,
+  remoteMcpTransport,
 } from '../src/core/mcp_registry.js';
 import { toMcpServerName } from '../src/utils/mcp_names.js';
 
@@ -34,11 +35,26 @@ describe('MCP server names', () => {
       type: 'http',
       url: 'https://example.com/mcp-app/mcp',
     });
+    await expect(getMcpConfig('https://mcp.hubspot.com/anthropic')).resolves.toMatchObject({
+      name: 'hubspot-com-anthropic',
+      type: 'http',
+      url: 'https://mcp.hubspot.com/anthropic',
+    });
+    await expect(getMcpConfig('https://mcp.asana.com/sse')).resolves.toMatchObject({
+      name: 'asana-com',
+      type: 'sse',
+      url: 'https://mcp.asana.com/sse',
+    });
   });
 
   it('does not confuse Git URLs with remote MCP endpoints', () => {
     expect(isRemoteMcpEndpoint('https://mcp.draw.io/mcp')).toBe(true);
+    expect(isRemoteMcpEndpoint('https://mcp.hubspot.com/anthropic')).toBe(true);
+    expect(isRemoteMcpEndpoint('https://mcp.asana.com/sse')).toBe(true);
     expect(isRemoteMcpEndpoint('https://github.com/jgraph/drawio-mcp.git#mcp-app-server')).toBe(false);
+    expect(remoteMcpTransport('https://mcp.draw.io/mcp')).toBe('http');
+    expect(remoteMcpTransport('https://mcp.hubspot.com/anthropic')).toBe('http');
+    expect(remoteMcpTransport('https://mcp.asana.com/sse')).toBe('sse');
   });
 });
 

@@ -30,9 +30,9 @@ export class ClaudeCodeAdapter extends BaseAdapter {
     const serverName = this.mcpServerName(mcp.name);
 
     this.removeMcpServerEntries(mcpServers, mcp.name);
-    mcpServers[serverName] = mcp.type === 'http' && mcp.url
+    mcpServers[serverName] = isRemoteMcp(mcp)
       ? {
-        type: 'http',
+        type: mcp.type,
         url: mcp.url,
       }
       : {
@@ -88,4 +88,8 @@ export class ClaudeCodeAdapter extends BaseAdapter {
       source: 'config' as const,
     }));
   }
+}
+
+function isRemoteMcp(mcp: McpRegistryEntry): mcp is McpRegistryEntry & { type: 'http' | 'sse'; url: string } {
+  return (mcp.type === 'http' || mcp.type === 'sse') && Boolean(mcp.url);
 }
