@@ -6,12 +6,15 @@
  */
 import chalk from 'chalk';
 import { exec } from 'node:child_process';
+import { dirname, join, relative, resolve } from 'node:path';
 import { promisify } from 'node:util';
 import type Database from 'better-sqlite3';
 import { getDb, genId } from '../db/index.js';
 import { detectAgents, getAllAdapters, resolveAdapters } from '../adapters/index.js';
 import { logger } from '../utils/logger.js';
+import { pathExists, readFileOrNull, readJsonFile } from '../utils/fs.js';
 import { looksLikeMcpAppName, toMcpServerName } from '../utils/mcp_names.js';
+import { AGENT_PATHS, getDataDir } from '../utils/platform.js';
 import type { AgentAdapter, AgentType, DiscoveredMcp, InstallScope, McpRegistryEntry } from '../types/index.js';
 
 const execAsync = promisify(exec);
@@ -42,6 +45,8 @@ interface McpInstallOptions {
 interface McpRemoveOptions {
   save?: boolean;
 }
+
+type ProjectConfigMcp = DiscoveredMcp & { agentName: AgentType };
 
 /** Scan agent config files for MCP services not tracked in the DB */
 async function discoverMcpFromConfigs(): Promise<DiscoveredMcp[]> {
@@ -326,6 +331,179 @@ async function removeProjectMcpRequirement(source: string, options: { save?: boo
   if (options.save === false) return;
   const { removeMcpRequirement } = await import('./modfile.js');
   await removeMcpRequirement(source);
+}
+
+export async function adoptProjectMcpConfigs(options: { save?: boolean } = {}): Promise<void> {
+  const discovered = await discoverProjectMcpFromConfigs();
+  if (discovered.length === 0) return;
+
+  const db = await getDb();
+  const grouped = new Map<string, { config: McpRegistryEntry; source: string; agents: Set<AgentType> }>();
+
+  for (const mcp of discovered) {
+    const config = discoveredMcpToRegistryEntry(mcp);
+    const source = await inferMcpSourceFromConfig(config) || config.name;
+    const key = `${source}:${config.name}:${config.command}:${(config.args || []).join('\0')}`;
+    const existing = grouped.get(key);
+
+    if (existing) {
+      existing.agents.add(mcp.agentName);
+      continue;
+    }
+
+    grouped.set(key, {
+      config,
+      source,
+      agents: new Set([mcp.agentName]),
+    });
+  }
+
+  for (const entry of grouped.values()) {
+    const agents = [...entry.agents];
+    upsertMcpInstallation(db, entry.source, entry.config, {}, 'project', 'all', agents);
+    await updateMcpSumfile(entry.source, entry.config, 'project');
+    await saveProjectMcpRequirement(entry.source, { save: options.save });
+  }
+}
+
+async function discoverProjectMcpFromConfigs(): Promise<ProjectConfigMcp[]> {
+  const results: ProjectConfigMcp[] = [];
+
+  results.push(...await readJsonProjectMcpConfig(
+    AGENT_PATHS['claude-code'].mcpConfig('project'),
+    'claude-code',
+    'Claude Code'
+  ));
+  results.push(...await readJsonProjectMcpConfig(
+    AGENT_PATHS['antigravity-cli'].mcpConfig('project'),
+    'antigravity-cli',
+    'Antigravity CLI'
+  ));
+  results.push(...await readJsonProjectMcpConfig(
+    AGENT_PATHS.cursor.mcpConfig('project'),
+    'cursor',
+    'Cursor'
+  ));
+
+  const codexConfig = await readFileOrNull(AGENT_PATHS.codex.mcpConfig('project'));
+  if (codexConfig) {
+    const { parseCodexMcpServers } = await import('../adapters/codex.js');
+    results.push(...parseCodexMcpServers(codexConfig, 'Codex (OpenAI)').map((mcp) => ({
+      ...mcp,
+      agentName: 'codex' as AgentType,
+    })));
+  }
+
+  const byKey = new Map<string, ProjectConfigMcp>();
+  for (const mcp of results) {
+    const key = `${mcp.agentName}:${mcp.name}:${mcp.command}:${(mcp.args || []).join('\0')}`;
+    byKey.set(key, mcp);
+  }
+
+  return [...byKey.values()];
+}
+
+async function readJsonProjectMcpConfig(
+  configPath: string | null,
+  agentName: AgentType,
+  agentDisplayName: string
+): Promise<ProjectConfigMcp[]> {
+  if (!configPath) return [];
+  const config = await readJsonFile<Record<string, unknown>>(configPath);
+  const mcpServers = config?.['mcpServers'] as Record<string, Record<string, unknown>> | undefined;
+  if (!mcpServers) return [];
+
+  return Object.entries(mcpServers).map(([name, serverConfig]) => ({
+    name,
+    command: (serverConfig['command'] as string) || (serverConfig['serverUrl'] as string) || (serverConfig['url'] as string) || 'unknown',
+    args: serverConfig['args'] as string[] | undefined,
+    agent: agentDisplayName,
+    agentName,
+    source: 'config' as const,
+  }));
+}
+
+function discoveredMcpToRegistryEntry(mcp: DiscoveredMcp): McpRegistryEntry {
+  const isRemote = /^https?:\/\//i.test(mcp.command);
+  return {
+    name: mcp.name,
+    type: isRemote ? 'http' : 'stdio',
+    command: isRemote ? '' : mcp.command,
+    url: isRemote ? mcp.command : undefined,
+    args: mcp.args || [],
+    envKeys: [],
+  };
+}
+
+async function inferMcpSourceFromConfig(config: McpRegistryEntry): Promise<string | null> {
+  for (const candidate of [config.command, ...(config.args || [])]) {
+    const source = await inferMcpSourceFromPath(candidate);
+    if (source) return source;
+  }
+
+  if (config.command === 'npx') {
+    const packageName = (config.args || []).find((arg) => !arg.startsWith('-'));
+    if (packageName) return packageName;
+  }
+
+  return null;
+}
+
+async function inferMcpSourceFromPath(value: string): Promise<string | null> {
+  if (!value) return null;
+
+  const cacheBase = resolve(getDataDir(), 'mcp-cache');
+  const absolutePath = resolve(value);
+  const relativeToCache = relative(cacheBase, absolutePath);
+  if (relativeToCache === '..' || relativeToCache.startsWith('..')) return null;
+
+  const repoRoot = await findNearestAncestor(absolutePath, cacheBase, '.git');
+  if (!repoRoot) return null;
+
+  const repoRelative = relative(cacheBase, repoRoot).split(/[\\/]+/).filter(Boolean).join('/');
+  if (!repoRelative.includes('/')) return null;
+
+  const repoUrl = `https://${repoRelative}.git`;
+  const projectRoot = await findNearestMcpProjectRoot(absolutePath, repoRoot);
+  if (!projectRoot || projectRoot === repoRoot) return repoUrl;
+
+  const projectPath = relative(repoRoot, projectRoot).split(/[\\/]+/).filter(Boolean).join('/');
+  return projectPath ? `${repoUrl}#${projectPath}` : repoUrl;
+}
+
+async function findNearestAncestor(startPath: string, stopAt: string, marker: string): Promise<string | null> {
+  let current = dirname(startPath);
+  const stop = resolve(stopAt);
+
+  while (current.startsWith(stop)) {
+    if (await pathExists(join(current, marker))) return current;
+    const next = dirname(current);
+    if (next === current) break;
+    current = next;
+  }
+
+  return null;
+}
+
+async function findNearestMcpProjectRoot(startPath: string, repoRoot: string): Promise<string | null> {
+  let current = dirname(startPath);
+  const stop = resolve(repoRoot);
+
+  while (current.startsWith(stop)) {
+    if (
+      await pathExists(join(current, 'package.json')) ||
+      await pathExists(join(current, 'pyproject.toml')) ||
+      await pathExists(join(current, 'go.mod'))
+    ) {
+      return current;
+    }
+
+    const next = dirname(current);
+    if (next === current) break;
+    current = next;
+  }
+
+  return null;
 }
 
 /** Install an MCP service independently and record it for future sync/promote. */

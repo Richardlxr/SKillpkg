@@ -1,7 +1,7 @@
 /**
  * Base Agent Adapter with shared logic
  */
-import { join } from 'node:path';
+import { join, resolve } from 'node:path';
 import type {
   AgentAdapter,
   AgentType,
@@ -59,6 +59,11 @@ export abstract class BaseAdapter implements AgentAdapter {
     await this.ensureAgentSymlink(scope);
 
     const targetDir = join(skillsDir, skill.frontmatter.name);
+
+    if (resolve(skill.localPath) === resolve(targetDir)) {
+      logger.agent(this.displayName, `Using existing ${skill.frontmatter.name} → ${targetDir}`);
+      return;
+    }
 
     // Remove existing if present
     if (await pathExistsNoFollow(targetDir)) {

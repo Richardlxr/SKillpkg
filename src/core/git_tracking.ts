@@ -1,12 +1,15 @@
 import inquirer from 'inquirer';
 import { getGitPreference } from './git_config.js';
 import { getDb } from '../db/index.js';
+import { AGENT_PATHS, unifiedProjectSkillsDir } from '../utils/platform.js';
+import { isSymbolicLink } from '../utils/fs.js';
 import {
   ensureSkillpkgGitignore,
   hasSkillpkgGitignore,
   SKILLPKG_GITIGNORE_CONFIG_PATHS,
   skillpkgGitignorePaths,
 } from '../utils/gitignore.js';
+import { projectRelativeSourceFromPath } from '../utils/path_source.js';
 import { logger } from '../utils/logger.js';
 
 type GitTrackingChoice = 'ignore' | 'track' | 'later';
@@ -73,8 +76,47 @@ export async function handleProjectGitTracking(
 async function projectGitignorePaths(cwd: string): Promise<string[]> {
   const db = await getDb();
   const rows = db
-    .prepare("SELECT name FROM skills WHERE scope = 'project' AND project_path = ? ORDER BY name")
-    .all(cwd) as { name: string }[];
+    .prepare("SELECT name, source_url, installed_path FROM skills WHERE scope = 'project' AND project_path = ? ORDER BY name")
+    .all(cwd) as { name: string; source_url: string; installed_path: string }[];
 
-  return skillpkgGitignorePaths(rows.map((row) => row.name));
+  return [
+    ...skillpkgGitignorePaths(
+      rows
+        .filter((row) => !isProjectLocalSkillSource(row, cwd))
+        .map((row) => row.name)
+    ),
+    ...await projectCompatibilitySymlinkIgnores(cwd),
+  ];
+}
+
+function isProjectLocalSkillSource(
+  row: { source_url: string; installed_path: string },
+  cwd: string
+): boolean {
+  const source = row.source_url.replace(/\\/g, '/');
+  if (source.startsWith('./.agents/skills/') || source.startsWith('.agents/skills/')) {
+    return true;
+  }
+
+  const unifiedDir = unifiedProjectSkillsDir(cwd).replace(/\\/g, '/');
+  const installedPath = row.installed_path.replace(/\\/g, '/');
+  return installedPath.startsWith(`${unifiedDir}/`);
+}
+
+async function projectCompatibilitySymlinkIgnores(cwd: string): Promise<string[]> {
+  const ignores: string[] = [];
+
+  for (const pathConfig of Object.values(AGENT_PATHS)) {
+    if (!('symlinkDir' in pathConfig)) continue;
+
+    const symlinkDir = pathConfig.symlinkDir(cwd);
+    if (!(await isSymbolicLink(symlinkDir))) continue;
+
+    const source = projectRelativeSourceFromPath(symlinkDir, cwd);
+    if (source) {
+      ignores.push(source.replace(/^\.\//, ''));
+    }
+  }
+
+  return ignores.sort();
 }

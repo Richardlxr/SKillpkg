@@ -9,7 +9,7 @@
  * - verify    (go mod verify)
  */
 import { join, resolve } from 'node:path';
-import { readdir } from 'node:fs/promises';
+import { readdir, realpath } from 'node:fs/promises';
 import chalk from 'chalk';
 import ora from 'ora';
 import type {
@@ -32,9 +32,11 @@ import {
   copyDir,
   ensureDirectorySymlink,
   isSymbolicLink,
+  listSubdirs,
   pathExistsNoFollow,
+  readFileOrNull,
 } from '../utils/fs.js';
-import { fileUrlFromPath } from '../utils/path_source.js';
+import { fileUrlFromPath, isLocalPathSource, projectRelativeSourceFromPath, resolveLocalPathSource } from '../utils/path_source.js';
 import { resolveAdapters } from '../adapters/index.js';
 import {
   loadSumfile,
@@ -56,23 +58,27 @@ import {
 // skm init — npm init / go mod init
 // ─────────────────────────────────────────────────────────────
 
-/** Initialize a new SKILL.md in the current directory */
+/** Initialize a new project manifest and, when needed, a root SKILL.md. */
 export async function initManifest(
   name?: string,
   interactive: boolean = false
 ): Promise<void> {
   const cwd = process.cwd();
   const mdPath = join(cwd, 'SKILL.md');
+  const projectSkillSources = await discoverProjectSkillSources(cwd);
+  const localSkillSources = projectSkillSources
+    .filter((source) => source.kind === 'local')
+    .map((source) => source.source);
+  const hasRootSkill = await pathExists(mdPath);
+  const rootFrontmatter = hasRootSkill ? await parseSkillMd(cwd) : null;
+  const shouldCreateRootSkill = !hasRootSkill && projectSkillSources.length === 0;
+  const shouldSaveRootSkill = projectSkillSources.length === 0 && (hasRootSkill || shouldCreateRootSkill);
+  const skillName = name || rootFrontmatter?.name || 'my-skill';
+  const moduleName = name || (projectSkillSources.length > 0 ? projectModuleName(cwd) : skillName);
 
-  if (await pathExists(mdPath)) {
-    logger.warn('SKILL.md already exists in this directory');
-    return;
-  }
-
-  const skillName = name || 'my-skill';
-  const description = 'A new agent skill';
-
-  const content = `---
+  if (shouldCreateRootSkill) {
+    const description = 'A new agent skill';
+    const content = `---
 name: ${skillName}
 version: "0.1.0"
 description: "${description}"
@@ -86,13 +92,41 @@ description: "${description}"
 ${description}
 `;
 
-  await writeFileSafe(mdPath, content);
+    await writeFileSafe(mdPath, content);
+    logger.success(`Created ${mdPath}`);
+  } else if (hasRootSkill) {
+    logger.warn('SKILL.md already exists in this directory');
+  }
   
   const modPath = join(cwd, 'skm.mod');
   if (!(await pathExists(modPath))) {
-    await writeFileSafe(modPath, `module ${skillName}\n\n`);
+    await writeFileSafe(modPath, `module ${moduleName}\n\n`);
     logger.success(`Created ${modPath}`);
   }
+
+  const { saveSkillRequirement } = await import('./modfile.js');
+  if (shouldSaveRootSkill) {
+    await saveSkillRequirement('.', undefined, { cwd, allowCreate: true });
+    await adoptProjectLocalSkill(cwd, '.');
+  }
+
+  for (const source of projectSkillSources) {
+    await saveSkillRequirement(source.source, undefined, { cwd, allowCreate: true });
+    if (source.kind === 'dependency') {
+      await adoptProjectDependencySkill(cwd, source);
+    } else {
+      await adoptProjectLocalSkill(cwd, source.source);
+    }
+  }
+
+  if (projectSkillSources.length > 0) {
+    await ensureProjectSkillCompatibilityLinks(cwd);
+  }
+
+  const { adoptProjectMcpConfigs } = await import('./mcp.js');
+  await adoptProjectMcpConfigs({ save: true });
+  await ensureProjectGeneratedConfigGitignore(cwd);
+  await warnIfProjectLocalSkillsAreGitignored(cwd, localSkillSources);
 
   if (interactive && process.stdin.isTTY && process.stdout.isTTY) {
     const { default: inquirer } = await import('inquirer');
@@ -110,8 +144,326 @@ ${description}
     await setGitPreference(gitPreference);
   }
 
-  logger.success(`Created ${mdPath}`);
   logger.info('Edit the SKILL.md and skm.mod files to configure your skill package');
+}
+
+type ProjectSkillSource =
+  | {
+    kind: 'local';
+    source: string;
+    skillDir: string;
+  }
+  | {
+    kind: 'dependency';
+    source: string;
+    skillDir: string;
+    sourceCommit: string;
+    installMode: InstallMode;
+    installedPath: string;
+    symlinkTarget: string | null;
+  };
+
+async function discoverProjectSkillSources(cwd: string): Promise<ProjectSkillSource[]> {
+  const skillsDir = unifiedProjectSkillsDir(cwd);
+  if (!(await pathExists(skillsDir))) return [];
+
+  const dirs = await listSubdirs(skillsDir);
+  const sources = new Map<string, ProjectSkillSource>();
+
+  for (const dir of dirs) {
+    const skillDir = join(skillsDir, dir);
+    const frontmatter = await parseSkillMd(skillDir);
+    if (!frontmatter?.name) continue;
+
+    if (await isSymbolicLink(skillDir)) {
+      const dependency = await dependencySourceForProjectSkillSymlink(cwd, skillDir, frontmatter.name);
+      if (dependency) {
+        sources.set(dependency.source, dependency);
+        continue;
+      }
+
+      if (!(await materializeProjectSkillSymlink(skillDir))) {
+        continue;
+      }
+    }
+
+    const source = projectRelativeSourceFromPath(skillDir, cwd);
+    if (source) {
+      sources.set(source, { kind: 'local', source, skillDir });
+    }
+  }
+
+  return [...sources.values()].sort((a, b) => a.source.localeCompare(b.source));
+}
+
+async function adoptProjectLocalSkill(cwd: string, source: string): Promise<void> {
+  const skillDir = resolveLocalPathSource(source, cwd);
+  const frontmatter = await parseSkillMd(skillDir);
+  if (!frontmatter?.name) return;
+
+  const integrity = await computeIntegrity(skillDir);
+  const db = await getDb();
+  const now = new Date().toISOString();
+  const unifiedPath = join(unifiedProjectSkillsDir(cwd), frontmatter.name);
+  const existingRow = db
+    .prepare('SELECT id FROM skills WHERE name = ? AND scope = ? AND project_path = ?')
+    .get(frontmatter.name, 'project', cwd) as { id: string } | undefined;
+
+  if (existingRow) {
+    db.prepare(`
+      UPDATE skills SET
+        source_url = ?, source_commit = ?, version = ?, description = ?,
+        installed_path = ?, unified_path = ?, symlink_target = ?, integrity = ?,
+        install_mode = ?, is_linked = ?, assigned_agents = ?, updated_at = ?
+      WHERE id = ?
+    `).run(
+      source, 'local', frontmatter.version || '0.0.0', frontmatter.description || '',
+      skillDir, unifiedPath, null, integrity,
+      'copy', legacyIsLinkedValue('copy'), 'all', now, existingRow.id
+    );
+  } else {
+    db.prepare(`
+      INSERT INTO skills
+        (id, name, source_url, source_commit, version, description, scope, project_path, alias, installed_path, unified_path, symlink_target, integrity, install_mode, is_linked, installed_at, updated_at, assigned_agents)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(
+      genId(), frontmatter.name, source, 'local',
+      frontmatter.version || '0.0.0', frontmatter.description || '',
+      'project', cwd, null, skillDir, unifiedPath, null, integrity,
+      'copy', legacyIsLinkedValue('copy'), now, now, 'all'
+    );
+  }
+
+  const sumfile = await loadSumfile({ scope: 'project', projectPath: cwd });
+  updateSumfileEntry(sumfile, {
+    frontmatter,
+    localPath: skillDir,
+    sourceUrl: source,
+    commit: 'local',
+    integrity,
+  });
+  await saveSumfile(sumfile, { scope: 'project', projectPath: cwd });
+}
+
+async function adoptProjectDependencySkill(cwd: string, source: Extract<ProjectSkillSource, { kind: 'dependency' }>): Promise<void> {
+  const frontmatter = await parseSkillMd(source.skillDir);
+  if (!frontmatter?.name) return;
+
+  const integrity = await computeIntegrity(source.skillDir);
+  const db = await getDb();
+  const now = new Date().toISOString();
+  const unifiedPath = join(unifiedProjectSkillsDir(cwd), frontmatter.name);
+  const existingRow = db
+    .prepare('SELECT id FROM skills WHERE name = ? AND scope = ? AND project_path = ?')
+    .get(frontmatter.name, 'project', cwd) as { id: string } | undefined;
+
+  let skillId = existingRow?.id || genId();
+  if (existingRow) {
+    db.prepare(`
+      UPDATE skills SET
+        source_url = ?, source_commit = ?, version = ?, description = ?,
+        installed_path = ?, unified_path = ?, symlink_target = ?, integrity = ?,
+        install_mode = ?, is_linked = ?, assigned_agents = ?, updated_at = ?
+      WHERE id = ?
+    `).run(
+      source.source, source.sourceCommit, frontmatter.version || '0.0.0', frontmatter.description || '',
+      source.installedPath, unifiedPath, source.symlinkTarget, integrity,
+      source.installMode, legacyIsLinkedValue(source.installMode), 'all', now, existingRow.id
+    );
+  } else {
+    db.prepare(`
+      INSERT INTO skills
+        (id, name, source_url, source_commit, version, description, scope, project_path, alias, installed_path, unified_path, symlink_target, integrity, install_mode, is_linked, installed_at, updated_at, assigned_agents)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(
+      skillId, frontmatter.name, source.source, source.sourceCommit,
+      frontmatter.version || '0.0.0', frontmatter.description || '',
+      'project', cwd, null, source.installedPath, unifiedPath, source.symlinkTarget, integrity,
+      source.installMode, legacyIsLinkedValue(source.installMode), now, now, 'all'
+    );
+  }
+
+  db.prepare(`
+    INSERT INTO project_skills (id, project_path, skill_source, version, installed_skill_id)
+    VALUES (?, ?, ?, ?, ?)
+    ON CONFLICT(project_path, skill_source) DO UPDATE SET
+      version = excluded.version,
+      installed_skill_id = excluded.installed_skill_id
+  `).run(genId(), cwd, source.source, null, skillId);
+
+  const sumfile = await loadSumfile({ scope: 'project', projectPath: cwd });
+  updateSumfileEntry(sumfile, {
+    frontmatter,
+    localPath: source.skillDir,
+    sourceUrl: source.source,
+    commit: source.sourceCommit,
+    integrity,
+  });
+  await saveSumfile(sumfile, { scope: 'project', projectPath: cwd });
+}
+
+async function dependencySourceForProjectSkillSymlink(
+  cwd: string,
+  skillDir: string,
+  skillName: string
+): Promise<Extract<ProjectSkillSource, { kind: 'dependency' }> | null> {
+  const target = await realPathOrNull(skillDir);
+  if (!target) return null;
+
+  const db = await getDb();
+  const rows = db.prepare(`
+    SELECT source_url, source_commit, installed_path, unified_path, symlink_target, install_mode, is_linked
+    FROM skills
+    WHERE name = ? AND (scope != 'project' OR project_path = ?)
+    ORDER BY CASE WHEN scope = 'project' THEN 0 ELSE 1 END
+  `).all(skillName, cwd) as Record<string, unknown>[];
+
+  for (const row of rows) {
+    const source = row['source_url'] as string;
+    if (!isManifestDependencySource(source)) continue;
+
+    const candidates = [
+      row['installed_path'] as string | null,
+      row['unified_path'] as string | null,
+      row['symlink_target'] as string | null,
+    ].filter((candidate): candidate is string => Boolean(candidate));
+
+    for (const candidate of candidates) {
+      if (await pointsAtSamePath(candidate, target)) {
+        return {
+          kind: 'dependency',
+          source,
+          skillDir,
+          sourceCommit: (row['source_commit'] as string) || 'resolved',
+          installMode: 'symlink-cache',
+          installedPath: (row['installed_path'] as string) || target,
+          symlinkTarget: (row['symlink_target'] as string) || target,
+        };
+      }
+    }
+  }
+
+  return null;
+}
+
+async function materializeProjectSkillSymlink(skillDir: string): Promise<boolean> {
+  const target = await realPathOrNull(skillDir);
+  if (!target) {
+    logger.warn(`Skipping broken project skill symlink: ${skillDir}`);
+    return false;
+  }
+
+  const tempDir = `${skillDir}.skm-materialize-${Date.now()}`;
+  await copyDir(target, tempDir);
+  await removePath(skillDir);
+  await copyDir(tempDir, skillDir);
+  await removePath(tempDir);
+  logger.info(`Copied symlinked project skill into ${skillDir}`);
+  return true;
+}
+
+async function ensureProjectSkillCompatibilityLinks(cwd: string): Promise<void> {
+  for (const [agentName, pathConfig] of Object.entries(AGENT_PATHS)) {
+    if (!('symlinkDir' in pathConfig)) continue;
+
+    const symlinkDir = pathConfig.symlinkDir(cwd);
+    const targetDir = pathConfig.project(cwd);
+    try {
+      const result = await ensureDirectorySymlink(symlinkDir, targetDir);
+      if (result === 'created') {
+        logger.info(`Created ${agentName} project skills compatibility link: ${symlinkDir} -> ${targetDir}`);
+      } else if (result === 'blocked') {
+        logger.warn(`${agentName} project skills path already exists and is not a compatible symlink: ${symlinkDir}`);
+      }
+    } catch (err) {
+      logger.warn(`Failed to create ${agentName} project skills compatibility link: ${(err as Error).message}`);
+    }
+  }
+}
+
+async function pointsAtSamePath(candidate: string, target: string): Promise<boolean> {
+  const resolved = await realPathOrNull(candidate);
+  return Boolean(resolved && resolve(resolved) === resolve(target));
+}
+
+async function realPathOrNull(path: string): Promise<string | null> {
+  try {
+    return await realpath(path);
+  } catch {
+    return null;
+  }
+}
+
+function isManifestDependencySource(source: string): boolean {
+  if (!source || source === '.' || source.startsWith('./') || source.startsWith('../')) {
+    return false;
+  }
+  if (source.startsWith('.\\') || source.startsWith('..\\') || source.startsWith('file://') || isLocalPathSource(source)) {
+    return false;
+  }
+  return true;
+}
+
+async function warnIfProjectLocalSkillsAreGitignored(cwd: string, sources: string[]): Promise<void> {
+  if (sources.length === 0) return;
+
+  const gitignore = await readFileOrNull(join(cwd, '.gitignore'));
+  if (!gitignore) return;
+
+  const broadAgentsIgnore = gitignore.split('\n').some((line) => {
+    const trimmed = line.trim();
+    return trimmed === '.agents/' || trimmed === '.agents' || trimmed === '.agents/*';
+  });
+
+  if (broadAgentsIgnore) {
+    logger.warn('Project-local skills live in .agents/skills, but .gitignore ignores .agents/. Remove the broad .agents/ rule or teammates will not receive those skills.');
+  }
+}
+
+async function ensureProjectGeneratedConfigGitignore(cwd: string): Promise<void> {
+  const { ensureSkillpkgGitignore, SKILLPKG_GITIGNORE_CONFIG_PATHS } = await import('../utils/gitignore.js');
+  await ensureSkillpkgGitignore(cwd, [
+    ...SKILLPKG_GITIGNORE_CONFIG_PATHS,
+    ...await discoverProjectSkillSymlinkIgnores(cwd),
+    ...await discoverProjectCompatibilitySymlinkIgnores(cwd),
+  ]);
+}
+
+async function discoverProjectSkillSymlinkIgnores(cwd: string): Promise<string[]> {
+  const skillsDir = unifiedProjectSkillsDir(cwd);
+  if (!(await pathExists(skillsDir))) return [];
+
+  const ignores: string[] = [];
+  for (const dir of await listSubdirs(skillsDir)) {
+    const skillDir = join(skillsDir, dir);
+    if (await isSymbolicLink(skillDir)) {
+      ignores.push(`.agents/skills/${dir}`);
+    }
+  }
+
+  return ignores.sort();
+}
+
+async function discoverProjectCompatibilitySymlinkIgnores(cwd: string): Promise<string[]> {
+  const ignores: string[] = [];
+
+  for (const pathConfig of Object.values(AGENT_PATHS)) {
+    if (!('symlinkDir' in pathConfig)) continue;
+
+    const symlinkDir = pathConfig.symlinkDir(cwd);
+    if (!(await isSymbolicLink(symlinkDir))) continue;
+
+    const source = projectRelativeSourceFromPath(symlinkDir, cwd);
+    if (source) {
+      ignores.push(source.replace(/^\.\//, ''));
+    }
+  }
+
+  return ignores.sort();
+}
+
+function projectModuleName(cwd: string): string {
+  return cwd.split(/[\\/]+/).filter(Boolean).pop() || 'project';
 }
 
 // ─────────────────────────────────────────────────────────────
@@ -283,13 +635,24 @@ export async function linkSkill(
 
   const scope = options.scope || 'global';
   const targetAgent = options.agent || 'all';
-  const installMode: InstallMode = options.mode === 'copy' ? 'copy' : 'symlink-dev';
+  const projectPath = scope === 'project' ? process.cwd() : '';
+  const projectRelativeSource = scope === 'project'
+    ? projectRelativeSourceFromPath(absPath, projectPath)
+    : null;
+  const unifiedProjectLocalPath = scope === 'project'
+    ? join(unifiedProjectSkillsDir(projectPath), frontmatter.name)
+    : null;
+  const isUnifiedProjectLocal = Boolean(
+    unifiedProjectLocalPath && resolve(absPath) === resolve(unifiedProjectLocalPath)
+  );
+  const installMode: InstallMode = isUnifiedProjectLocal || options.mode === 'copy' ? 'copy' : 'symlink-dev';
+  const sourceUrl = isUnifiedProjectLocal && projectRelativeSource ? projectRelativeSource : fileUrlFromPath(absPath);
   const integrity = await computeIntegrity(absPath);
 
   const skillPkg: SkillPackage = {
     frontmatter,
     localPath: absPath,
-    sourceUrl: fileUrlFromPath(absPath),
+    sourceUrl,
     commit: 'linked',
     integrity,
   };
@@ -302,7 +665,6 @@ export async function linkSkill(
   // Record in DB
   const db = await getDb();
   const now = new Date().toISOString();
-  const projectPath = scope === 'project' ? process.cwd() : '';
   const symlinkTarget = isSymlinkInstallMode(installMode) ? absPath : null;
   const unifiedPath = scope === 'project'
     ? join(unifiedProjectSkillsDir(projectPath), frontmatter.name)
@@ -311,8 +673,8 @@ export async function linkSkill(
     INSERT OR REPLACE INTO skills (id, name, source_url, source_commit, version, description, scope, project_path, alias, installed_path, unified_path, symlink_target, integrity, install_mode, is_linked, installed_at, updated_at)
     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
   `).run(
-    genId(), frontmatter.name, fileUrlFromPath(absPath), 'linked',
-    frontmatter.version || '0.0.0-linked', frontmatter.description || '',
+    genId(), frontmatter.name, sourceUrl, isUnifiedProjectLocal ? 'local' : 'linked',
+    frontmatter.version || (isUnifiedProjectLocal ? '0.0.0' : '0.0.0-linked'), frontmatter.description || '',
     scope, projectPath, null, absPath, unifiedPath, symlinkTarget, integrity,
     installMode, legacyIsLinkedValue(installMode), now, now
   );
@@ -331,7 +693,7 @@ export async function linkSkill(
   if (scope === 'project') {
     if (options.save === true) {
       const { saveSkillRequirement } = await import('./modfile.js');
-      await saveSkillRequirement(fileUrlFromPath(absPath), frontmatter.version, {
+      await saveSkillRequirement(projectRelativeSource || fileUrlFromPath(absPath), frontmatter.version, {
         save: options.save,
         yes: options.yes,
         allowCreate: true,

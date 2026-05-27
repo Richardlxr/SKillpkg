@@ -1,7 +1,13 @@
 import { afterEach, describe, expect, it } from 'vitest';
 import { join } from 'node:path';
 import { AGENT_PATHS, getCodexHomeDir, getHomeDir, unifiedProjectSkillsDir } from '../src/utils/platform.js';
-import { fileUrlFromPath, isLocalPathSource, localPathFromSource, resolveLocalPathSource } from '../src/utils/path_source.js';
+import {
+  fileUrlFromPath,
+  isLocalPathSource,
+  localPathFromSource,
+  projectRelativeSourceFromPath,
+  resolveLocalPathSource,
+} from '../src/utils/path_source.js';
 
 const platformDescriptor = Object.getOwnPropertyDescriptor(process, 'platform');
 
@@ -78,6 +84,12 @@ describe('local path sources', () => {
 
   it('keeps Windows absolute replacement paths absolute on non-Windows hosts', () => {
     expect(resolveLocalPathSource('C:\\Users\\Alice\\skill', '/project')).toBe('C:\\Users\\Alice\\skill');
+  });
+
+  it('formats project-local paths as portable relative sources', () => {
+    expect(projectRelativeSourceFromPath('/project/.agents/skills/demo', '/project')).toBe('./.agents/skills/demo');
+    expect(projectRelativeSourceFromPath('/outside/demo', '/project')).toBe(null);
+    expect(projectRelativeSourceFromPath('/project', '/project')).toBe('.');
   });
 });
 

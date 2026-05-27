@@ -965,7 +965,7 @@ export async function installFromMod(options: InstallOptions = {}): Promise<void
 
   logger.info(`Found ${mod.skills.length} skill(s) and ${mod.mcps.length} MCP service(s) in skm.mod`);
   for (const req of mod.skills) {
-    const source = req.version ? `${req.source}@${req.version}` : req.source;
+    const source = req.version && !isLocalPathSource(req.source) ? `${req.source}@${req.version}` : req.source;
     await installSkill(source, { ...options, scope });
   }
 

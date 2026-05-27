@@ -5,7 +5,9 @@ import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { linkSkill } from '../src/core/commands.js';
 import { setGitPreference } from '../src/core/git_config.js';
-import { closeDb } from '../src/db/index.js';
+import { handleProjectGitTracking } from '../src/core/git_tracking.js';
+import { closeDb, getDb, genId } from '../src/db/index.js';
+import { ensureDirectorySymlink } from '../src/utils/fs.js';
 
 const mocks = vi.hoisted(() => ({
   prompt: vi.fn(),
@@ -93,6 +95,56 @@ describe('project git tracking preference', () => {
     const gitignore = await readFile(join(projectDir, '.gitignore'), 'utf-8');
     expect(gitignore).toContain('.mcp.json');
     expect(gitignore).not.toContain('.agents/skills/saved-link');
+  });
+
+  it('saves in-project local links as relative sources', async () => {
+    const skillSource = await writeSkill(join(projectDir, '.agents', 'skills'), 'local-link');
+    await setGitPreference('track');
+
+    await linkSkill(skillSource, { scope: 'project', save: true });
+
+    const mod = await readFile(join(projectDir, 'skm.mod'), 'utf-8');
+    expect(mod).toContain('skill ./.agents/skills/local-link');
+    expect(mod).not.toContain('file://');
+  });
+
+  it('keeps unified project-local skills trackable in auto mode', async () => {
+    const skillSource = await writeSkill(join(projectDir, '.agents', 'skills'), 'team-skill');
+    await setGitPreference('auto');
+
+    await linkSkill(skillSource, { scope: 'project' });
+
+    const gitignore = await readFile(join(projectDir, '.gitignore'), 'utf-8');
+    expect(gitignore).toContain('.mcp.json');
+    expect(gitignore).not.toContain('.agents/skills/team-skill');
+  });
+
+  it('preserves native compatibility symlink ignores when refreshing gitignore', async () => {
+    await mkdir(join(projectDir, '.agents', 'skills'), { recursive: true });
+    await ensureDirectorySymlink(join(projectDir, '.claude', 'skills'), join(projectDir, '.agents', 'skills'));
+
+    const db = await getDb();
+    const now = new Date().toISOString();
+    db.prepare(`
+      INSERT INTO skills
+        (id, name, source_url, source_commit, version, description, scope, project_path, alias, installed_path, unified_path, symlink_target, integrity, install_mode, is_linked, installed_at, updated_at, assigned_agents)
+      VALUES (?, 'remote-demo', 'https://github.com/acme/remote-demo.git', 'abc1234', '0.0.0', 'remote demo', 'project', ?, NULL, ?, ?, ?, 'sha256-old', 'symlink-cache', 1, ?, ?, 'all')
+    `).run(
+      genId(),
+      projectDir,
+      join(root, 'cache', 'remote-demo'),
+      join(projectDir, '.agents', 'skills', 'remote-demo'),
+      join(root, 'cache', 'remote-demo'),
+      now,
+      now
+    );
+
+    await setGitPreference('auto');
+    await handleProjectGitTracking({ cwd: projectDir, yes: true });
+
+    const gitignore = await readFile(join(projectDir, '.gitignore'), 'utf-8');
+    expect(gitignore).toContain('.agents/skills/remote-demo');
+    expect(gitignore).toContain('.claude/skills');
   });
 });
 

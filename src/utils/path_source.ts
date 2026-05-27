@@ -1,4 +1,4 @@
-import { isAbsolute, resolve, win32 } from 'node:path';
+import { isAbsolute, relative, resolve, sep, win32 } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 
 /** True when a source string points at a local filesystem path instead of a Git source. */
@@ -38,6 +38,21 @@ export function resolveLocalPathSource(source: string, baseDir: string): string 
 /** Convert a filesystem path into a portable file URL for database records. */
 export function fileUrlFromPath(filePath: string): string {
   return pathToFileURL(filePath).href;
+}
+
+/** Return a portable project-relative source when a local path lives under a project. */
+export function projectRelativeSourceFromPath(filePath: string, projectPath: string): string | null {
+  const relativePath = relative(projectPath, filePath);
+  const outsideProject = relativePath === '..' || relativePath.startsWith(`..${sep}`);
+  if (!relativePath || outsideProject || isAbsolute(relativePath) || win32.isAbsolute(relativePath)) {
+    return relativePath === '' ? '.' : null;
+  }
+
+  const portablePath = relativePath.split(sep).join('/');
+  if (portablePath === '.') return portablePath;
+  return portablePath.startsWith('./') || portablePath.startsWith('../')
+    ? portablePath
+    : `./${portablePath}`;
 }
 
 function isFileUrlSource(source: string): boolean {

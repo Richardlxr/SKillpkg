@@ -65,6 +65,20 @@ describe('unified project skills', () => {
     expect(existsSync(join(projectDir, '.agents', 'skills', 'missing-demo'))).toBe(false);
   });
 
+  it('keeps existing unified project-local skill directories in place', async () => {
+    const targetSkill = join(projectDir, '.agents', 'skills', 'demo');
+    await writeSkill(targetSkill, 'demo', 'demo skill');
+
+    const adapter = new ClaudeCodeAdapter();
+    await adapter.installSkill({
+      frontmatter: { name: 'demo', description: 'demo skill' },
+      localPath: targetSkill,
+      commit: 'local',
+    }, 'project');
+
+    expect(existsSync(join(targetSkill, 'SKILL.md'))).toBe(true);
+  });
+
   it('replaces existing dangling project skill links', async () => {
     const skillSource = join(root, 'source-skill');
     const targetSkill = join(projectDir, '.agents', 'skills', 'demo');

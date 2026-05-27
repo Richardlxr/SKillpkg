@@ -175,7 +175,7 @@ function buildCodexMcpBlock(mcp: McpRegistryEntry, env: Record<string, string>):
   return lines.join('\n');
 }
 
-function parseCodexMcpServers(content: string, agent: string): DiscoveredMcp[] {
+export function parseCodexMcpServers(content: string, agent: string): DiscoveredMcp[] {
   const results: DiscoveredMcp[] = [];
   let current: DiscoveredMcp | null = null;
 
