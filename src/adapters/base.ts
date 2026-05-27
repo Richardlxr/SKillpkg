@@ -21,6 +21,7 @@ import {
   readJsonFile,
   createSymlinkOrCopy,
   ensureDirectorySymlink,
+  pathExistsNoFollow,
 } from '../utils/fs.js';
 import { parseSkillMd } from '../parsers/index.js';
 import { logger } from '../utils/logger.js';
@@ -60,7 +61,7 @@ export abstract class BaseAdapter implements AgentAdapter {
     const targetDir = join(skillsDir, skill.frontmatter.name);
 
     // Remove existing if present
-    if (await pathExists(targetDir)) {
+    if (await pathExistsNoFollow(targetDir)) {
       await removePath(targetDir);
     }
 

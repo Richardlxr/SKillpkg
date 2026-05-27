@@ -98,6 +98,10 @@ export async function copyDir(src: string, dest: string): Promise<void> {
 /** Create a symlink (falls back to copy on systems that disallow symlinks) */
 export async function createSymlinkOrCopy(target: string, linkPath: string): Promise<boolean> {
   await ensureDir(dirname(linkPath));
+  if (!(await pathExists(target))) {
+    throw new Error(`Source path does not exist: ${target}`);
+  }
+
   try {
     await symlink(target, linkPath, 'dir');
     return true;

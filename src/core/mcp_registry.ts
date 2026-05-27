@@ -1,5 +1,6 @@
 import type { McpRegistryEntry } from '../types/index.js';
 import { looksLikeMcpAppName, toMcpServerName } from '../utils/mcp_names.js';
+import { promptForSearchableSelection } from '../utils/searchable_selection.js';
 
 /**
  * Built-in registry of known MCP servers.
@@ -50,7 +51,7 @@ export const MCP_REGISTRY: Record<string, McpRegistryEntry> = {
   }
 };
 
-import { join } from 'node:path';
+import { join, relative } from 'node:path';
 import { createHash } from 'node:crypto';
 import { pathExists, readJsonFile } from '../utils/fs.js';
 
@@ -61,23 +62,31 @@ import { pathExists, readJsonFile } from '../utils/fs.js';
  * Otherwise, builds a generic fallback config assuming it is an npm package.
  */
 export async function getMcpConfig(name: string): Promise<McpRegistryEntry> {
+  const configs = await getMcpConfigs(name);
+  if (configs.length === 0) {
+    throw new Error(`Could not resolve MCP config for '${name}'.`);
+  }
+  return configs[0];
+}
+
+export async function getMcpConfigs(name: string): Promise<McpRegistryEntry[]> {
   // Handle names with @version, but preserve scoped packages (e.g. @org/pkg@1.0.0)
   const atIndex = name.lastIndexOf('@');
   const pkgName = atIndex > 0 ? name.substring(0, atIndex) : name;
   
   if (MCP_REGISTRY[pkgName]) {
-    return MCP_REGISTRY[pkgName];
+    return [MCP_REGISTRY[pkgName]];
   }
 
   if (isRemoteMcpEndpoint(name)) {
-    return {
+    return [{
       name: nameFromRemoteMcpUrl(name),
       type: remoteMcpTransport(name) || 'http',
       url: name,
       command: '',
       args: [],
       envKeys: [],
-    };
+    }];
   }
 
   if (looksLikeMcpAppPackageName(pkgName)) {
@@ -94,8 +103,8 @@ export async function getMcpConfig(name: string): Promise<McpRegistryEntry> {
   // a slash, but should go through the npx fallback instead.
   if (name.includes('://') || name.startsWith('github:') || (!isScopedNpmPackage && name.split('/').length >= 2)) {
     try {
-      const builtConfig = await buildMcpFromSource(name);
-      if (builtConfig) return builtConfig;
+      const builtConfigs = await buildMcpsFromSource(name);
+      if (builtConfigs && builtConfigs.length > 0) return builtConfigs;
     } catch (e: any) {
       const chalk = (await import('chalk')).default;
       console.warn(chalk.yellow(`\n⚠️  Failed to build MCP from source '${name}': ${e.message}`));
@@ -111,12 +120,12 @@ export async function getMcpConfig(name: string): Promise<McpRegistryEntry> {
     throw new Error(`Could not detect project type for MCP URL '${name}'. Please ensure the repository contains a package.json, pyproject.toml, or go.mod.`);
   }
 
-  return {
+  return [{
     name: toMcpServerName(pkgName),
     command: 'npx',
     args: ['-y', name],
     envKeys: []
-  };
+  }];
 }
 
 export function looksLikeMcpAppPackageName(name: string): boolean {
@@ -199,6 +208,9 @@ export function parsePythonProjectMetadata(
 type PackageJsonLike = {
   name?: string;
   description?: string;
+  bin?: string | Record<string, string>;
+  main?: string;
+  scripts?: Record<string, string>;
   dependencies?: Record<string, unknown>;
   devDependencies?: Record<string, unknown>;
 };
@@ -216,13 +228,16 @@ export function isUnsupportedMcpAppPackage(pkg: PackageJsonLike | null | undefin
   );
 }
 
-async function buildMcpFromSource(source: string): Promise<McpRegistryEntry | null> {
+interface McpProjectCandidate {
+  path: string;
+  name: string;
+  type: string;
+}
+
+async function buildMcpsFromSource(source: string): Promise<McpRegistryEntry[] | null> {
   const { parseSourceString } = await import('../parsers/index.js');
   const { cloneOrPull } = await import('../utils/git.js');
-  const { getDefaultConfig, getDataDir } = await import('../utils/platform.js');
-  const { exec } = await import('node:child_process');
-  const { promisify } = await import('node:util');
-  const execAsync = promisify(exec);
+  const { getDataDir } = await import('../utils/platform.js');
   const ora = (await import('ora')).default;
   const chalk = (await import('chalk')).default;
 
@@ -230,81 +245,150 @@ async function buildMcpFromSource(source: string): Promise<McpRegistryEntry | nu
   if (!isCloneableGitSource(repoUrl)) return null;
 
   // Global cache directory for MCPs
-  const config = getDefaultConfig();
   const mcpCacheBase = join(getDataDir(), 'mcp-cache');
   const repoName = repoUrl.split('/').pop()?.replace('.git', '') || 'unknown';
 
   const spinner = ora(`Fetching custom MCP from ${repoUrl}...`).start();
+  let fetching = true;
   try {
     const clonedDir = await cloneOrPull(repoUrl, mcpCacheBase);
-    let workDir = skillPath ? join(clonedDir, skillPath) : clonedDir;
+    const workDir = skillPath ? join(clonedDir, skillPath) : clonedDir;
 
     if (!(await pathExists(workDir))) {
       throw new Error(`The specified path '${skillPath || ''}' does not exist in the repository.`);
     }
 
-    let pkgJsonPath = join(workDir, 'package.json');
-    let pyprojectPath = join(workDir, 'pyproject.toml');
-    let goModPath = join(workDir, 'go.mod');
-
-    // Monorepo detection: if no project at current workDir, scan subdirectories
-    if (!(await pathExists(pkgJsonPath)) && !(await pathExists(pyprojectPath)) && !(await pathExists(goModPath))) {
-      const fs = await import('node:fs/promises');
-      const subdirs = await fs.readdir(workDir, { withFileTypes: true });
-      const projects: { path: string; name: string; type: string }[] = [];
-
-      for (const dir of subdirs) {
-        if (!dir.isDirectory() || dir.name.startsWith('.') || dir.name === 'node_modules') continue;
-        const subPath = join(workDir, dir.name);
-
-        if (await pathExists(join(subPath, 'package.json'))) {
-          // Verify it's a valid application (has bin or main, or index.js)
-          const pkg = await readJsonFile<any>(join(subPath, 'package.json'));
-          if (isUnsupportedMcpAppPackage(pkg)) continue;
-          const hasEntryPoint = pkg?.bin || pkg?.main || await pathExists(join(subPath, 'index.js')) || await pathExists(join(subPath, 'dist', 'index.js')) || await pathExists(join(subPath, 'src', 'index.js'));
-          if (hasEntryPoint) {
-            projects.push({ path: subPath, name: dir.name, type: 'Node.js' });
-          }
-        } else if (await pathExists(join(subPath, 'pyproject.toml'))) {
-          projects.push({ path: subPath, name: dir.name, type: 'Python (uv)' });
-        } else if (await pathExists(join(subPath, 'go.mod'))) {
-          projects.push({ path: subPath, name: dir.name, type: 'Go' });
-        }
-      }
-
-      // Sort projects deterministically to avoid random OS readdir orders
-      projects.sort((a, b) => a.name.localeCompare(b.name));
-
-      if (projects.length > 0) {
-        spinner.stop();
-        const inquirer = (await import('inquirer')).default;
-        const { logger } = await import('../utils/logger.js');
-        
-        let selectedPath = projects[0].path;
-        if (projects.length > 1) {
-          const { choice } = await inquirer.prompt([{
-            type: 'list',
-            name: 'choice',
-            message: chalk.cyan(`Multiple MCP projects found in this repository. Which one would you like to install?`),
-            choices: projects.map(p => ({
-              name: `${p.name} (${p.type})`,
-              value: p.path
-            }))
-          }]);
-          selectedPath = choice;
-        } else {
-          logger.info(`Detected monorepo. Auto-selecting the only project found: ${chalk.cyan(projects[0].name)}`);
-          selectedPath = projects[0].path;
-        }
-        
-        workDir = selectedPath;
-        pkgJsonPath = join(workDir, 'package.json');
-        pyprojectPath = join(workDir, 'pyproject.toml');
-        goModPath = join(workDir, 'go.mod');
-        spinner.start(`Building ${projects.find(p => p.path === selectedPath)?.name || 'project'}...`);
-      }
+    const projects = await discoverMcpProjects(workDir, repoName);
+    if (projects.length === 0) {
+      spinner.warn(chalk.yellow(`Could not detect project type (Node.js/Python uv/Go) for auto-build. Falling back...`));
+      return null;
     }
 
+    spinner.stop();
+    fetching = false;
+
+    const selectedProjects = await selectMcpProjects(projects, chalk);
+    const configs: McpRegistryEntry[] = [];
+    for (const project of selectedProjects) {
+      const config = await buildMcpProject(project.path, project.name);
+      configs.push({
+        ...config,
+        source: sourceForMcpProject(source, clonedDir, project.path),
+      });
+    }
+
+    return configs;
+  } catch (e: any) {
+    if (fetching) {
+      spinner.fail(chalk.red(`Failed to setup MCP: ${e.message}`));
+    }
+    throw e;
+  }
+}
+
+async function discoverMcpProjects(workDir: string, fallbackName: string): Promise<McpProjectCandidate[]> {
+  const direct = await detectMcpProject(workDir, fallbackName, false);
+  if (direct) return [direct];
+
+  const fs = await import('node:fs/promises');
+  const subdirs = await fs.readdir(workDir, { withFileTypes: true });
+  const projects: McpProjectCandidate[] = [];
+
+  for (const dir of subdirs) {
+    if (!dir.isDirectory() || dir.name.startsWith('.') || dir.name === 'node_modules') continue;
+
+    const project = await detectMcpProject(join(workDir, dir.name), dir.name, true);
+    if (project) projects.push(project);
+  }
+
+  return projects.sort((a, b) => a.name.localeCompare(b.name));
+}
+
+async function detectMcpProject(
+  projectPath: string,
+  fallbackName: string,
+  skipUnsupported: boolean
+): Promise<McpProjectCandidate | null> {
+  const pkgJsonPath = join(projectPath, 'package.json');
+  if (await pathExists(pkgJsonPath)) {
+    const pkg: any = await readJsonFile(pkgJsonPath);
+    if (isUnsupportedMcpAppPackage(pkg)) {
+      if (skipUnsupported) return null;
+      throw new Error(
+        `Node package '${pkg?.name || fallbackName}' appears to be an MCP App/HTTP server. ` +
+        `skm currently configures stdio MCP clients only. Choose a stdio server such as mcp-tool-server.`
+      );
+    }
+
+    const hasEntryPoint = Boolean(
+      pkg?.bin ||
+      pkg?.main ||
+      await pathExists(join(projectPath, 'index.js')) ||
+      await pathExists(join(projectPath, 'dist', 'index.js')) ||
+      await pathExists(join(projectPath, 'src', 'index.js'))
+    );
+    if (!hasEntryPoint && skipUnsupported) {
+      return null;
+    }
+
+    return { path: projectPath, name: pkg?.name || fallbackName, type: 'Node.js' };
+  }
+
+  if (await pathExists(join(projectPath, 'pyproject.toml'))) {
+    return { path: projectPath, name: fallbackName, type: 'Python (uv)' };
+  }
+
+  if (await pathExists(join(projectPath, 'go.mod'))) {
+    return { path: projectPath, name: fallbackName, type: 'Go' };
+  }
+
+  return null;
+}
+
+async function selectMcpProjects(
+  projects: McpProjectCandidate[],
+  chalk: typeof import('chalk').default
+): Promise<McpProjectCandidate[]> {
+  if (projects.length === 1) {
+    const { logger } = await import('../utils/logger.js');
+    logger.info(`Detected monorepo. Auto-selecting the only project found: ${chalk.cyan(projects[0].name)}`);
+    return projects;
+  }
+
+  const selectedPaths = await promptForSearchableSelection({
+    choices: projects.map((project) => ({
+      name: `${project.name} (${project.type})`,
+      value: project.path,
+      searchable: `${project.name} ${project.type} ${project.path}`,
+    })),
+    itemLabel: 'MCP projects',
+    queryName: 'mcpProjectSearch',
+    selectionName: 'selectedMcpProjects',
+    searchMessage: (total) => `Search MCP projects by name/path/type (${total} found, leave blank for all):`,
+    selectMessage: (matched, total, query) => query
+      ? `Found ${matched} of ${total} MCP projects matching "${query}". Select which ones to install:`
+      : `Found ${total} MCP projects in this repository. Select which ones to install:`,
+    noMatchesMessage: (query) => `No MCP projects matched "${query}". Try another keyword or leave blank to show all.`,
+    includeSelectAll: true,
+  });
+
+  const selected = new Set(selectedPaths);
+  return projects.filter((project) => selected.has(project.path));
+}
+
+async function buildMcpProject(workDir: string, repoName: string): Promise<McpRegistryEntry> {
+  const { exec } = await import('node:child_process');
+  const { promisify } = await import('node:util');
+  const execAsync = promisify(exec);
+  const ora = (await import('ora')).default;
+  const chalk = (await import('chalk')).default;
+
+  const pkgJsonPath = join(workDir, 'package.json');
+  const pyprojectPath = join(workDir, 'pyproject.toml');
+  const goModPath = join(workDir, 'go.mod');
+  const spinner = ora(`Building ${repoName}...`).start();
+
+  try {
     if (await pathExists(pkgJsonPath)) {
       const pkg: any = await readJsonFile(pkgJsonPath);
       if (isUnsupportedMcpAppPackage(pkg)) {
@@ -314,40 +398,26 @@ async function buildMcpFromSource(source: string): Promise<McpRegistryEntry | nu
         );
       }
 
-      spinner.text = chalk.blue('📦 Installing Node.js dependencies...');
+      spinner.text = chalk.blue('Installing Node.js dependencies...');
       await execAsync('npm install --ignore-scripts', { cwd: workDir });
-      
-      // Try common build/setup scripts
+
       const buildScripts = ['build', 'compile', 'prepare', 'prepack', 'prestart'];
       for (const script of buildScripts) {
         if (pkg?.scripts?.[script]) {
-          spinner.text = chalk.blue(`🔨 Running ${script} script...`);
+          spinner.text = chalk.blue(`Running ${script} script...`);
           await execAsync(`npm run ${script}`, { cwd: workDir });
-          // If we found a primary build script, we can stop
           if (script === 'build' || script === 'compile') break;
         }
       }
 
-      // Find entry point
-      let entryPoint = '';
-      if (pkg?.bin) {
-        entryPoint = typeof pkg.bin === 'string' ? pkg.bin : Object.values(pkg.bin)[0] as string;
-      } else if (pkg?.main) {
-        entryPoint = pkg.main;
-      } else {
-        // Fallbacks
-        if (await pathExists(join(workDir, 'dist', 'index.js'))) entryPoint = 'dist/index.js';
-        else if (await pathExists(join(workDir, 'build', 'index.js'))) entryPoint = 'build/index.js';
-        else if (await pathExists(join(workDir, 'index.js'))) entryPoint = 'index.js';
-      }
-
+      const entryPoint = await findNodeEntryPoint(workDir, pkg);
       if (!entryPoint) {
         throw new Error('Could not find bin, main, or dist/index.js in package.json');
       }
 
       const absoluteEntryPoint = join(workDir, entryPoint);
       if (!(await pathExists(absoluteEntryPoint))) {
-         throw new Error(`Resolved entry point does not exist: ${absoluteEntryPoint}`);
+        throw new Error(`Resolved entry point does not exist: ${absoluteEntryPoint}`);
       }
 
       spinner.succeed(chalk.green(`Successfully built custom Node.js MCP: ${pkg.name || repoName}`));
@@ -355,21 +425,21 @@ async function buildMcpFromSource(source: string): Promise<McpRegistryEntry | nu
         name: toMcpServerName(pkg.name || repoName),
         command: 'node',
         args: [absoluteEntryPoint],
-        envKeys: [] // Ask user later or default to empty
+        envKeys: [],
       };
-    } else if (await pathExists(pyprojectPath)) {
-      spinner.text = chalk.blue('🐍 Setting up Python environment with uv...');
-      
+    }
+
+    if (await pathExists(pyprojectPath)) {
+      spinner.text = chalk.blue('Setting up Python environment with uv...');
+
       try {
         await execAsync('uv sync', { cwd: workDir });
       } catch (e: any) {
         throw new Error(`uv sync failed: ${e.message}. Is 'uv' installed?`);
       }
 
-      // Read pyproject.toml to find the project name
       const fs = await import('node:fs/promises');
       const pyprojectContent = await fs.readFile(pyprojectPath, 'utf-8');
-      
       const { name: mcpName, scriptName } = parsePythonProjectMetadata(pyprojectContent, repoName);
 
       spinner.succeed(chalk.green(`Successfully setup custom Python MCP: ${mcpName}`));
@@ -377,11 +447,13 @@ async function buildMcpFromSource(source: string): Promise<McpRegistryEntry | nu
         name: mcpName,
         command: 'uv',
         args: ['--directory', workDir, 'run', scriptName],
-        envKeys: []
+        envKeys: [],
       };
-    } else if (await pathExists(goModPath)) {
-      spinner.text = chalk.blue('🐹 Building Go project...');
-      
+    }
+
+    if (await pathExists(goModPath)) {
+      spinner.text = chalk.blue('Building Go project...');
+
       try {
         await execAsync('go build -o mcp-server', { cwd: workDir });
       } catch (e: any) {
@@ -390,7 +462,7 @@ async function buildMcpFromSource(source: string): Promise<McpRegistryEntry | nu
 
       const absoluteEntryPoint = join(workDir, 'mcp-server');
       if (!(await pathExists(absoluteEntryPoint))) {
-         throw new Error(`Go build did not produce an mcp-server executable`);
+        throw new Error(`Go build did not produce an mcp-server executable`);
       }
 
       spinner.succeed(chalk.green(`Successfully built custom Go MCP: ${repoName}`));
@@ -398,16 +470,38 @@ async function buildMcpFromSource(source: string): Promise<McpRegistryEntry | nu
         name: toMcpServerName(repoName),
         command: absoluteEntryPoint,
         args: [],
-        envKeys: []
+        envKeys: [],
       };
     }
 
-    spinner.warn(chalk.yellow(`Could not detect project type (Node.js/Python uv/Go) for auto-build. Falling back...`));
-    return null;
+    throw new Error(`Could not detect project type for ${workDir}`);
   } catch (e: any) {
     spinner.fail(chalk.red(`Failed to setup MCP: ${e.message}`));
     throw e;
   }
+}
+
+async function findNodeEntryPoint(workDir: string, pkg: PackageJsonLike): Promise<string> {
+  if (pkg?.bin) {
+    return typeof pkg.bin === 'string' ? pkg.bin : Object.values(pkg.bin)[0] as string;
+  }
+
+  if (pkg?.main) {
+    return pkg.main;
+  }
+
+  if (await pathExists(join(workDir, 'dist', 'index.js'))) return 'dist/index.js';
+  if (await pathExists(join(workDir, 'build', 'index.js'))) return 'build/index.js';
+  if (await pathExists(join(workDir, 'index.js'))) return 'index.js';
+  return '';
+}
+
+function sourceForMcpProject(source: string, clonedDir: string, workDir: string): string {
+  const relativeProjectPath = relative(clonedDir, workDir).split(/[\\/]+/).filter(Boolean).join('/');
+  if (!relativeProjectPath) return source;
+
+  const baseSource = source.includes('#') ? source.substring(0, source.indexOf('#')) : source;
+  return `${baseSource}#${relativeProjectPath}`;
 }
 
 function isCloneableGitSource(repoUrl: string): boolean {

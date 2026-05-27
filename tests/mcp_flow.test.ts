@@ -10,6 +10,7 @@ const mocks = vi.hoisted(() => ({
   getAllAdapters: vi.fn(),
   resolveAdapters: vi.fn(),
   getMcpConfig: vi.fn(),
+  getMcpConfigs: vi.fn(),
   promptForMcpEnv: vi.fn(),
   handleProjectGitTracking: vi.fn(),
 }));
@@ -22,6 +23,7 @@ vi.mock('../src/adapters/index.js', () => ({
 
 vi.mock('../src/core/mcp_registry.js', () => ({
   getMcpConfig: mocks.getMcpConfig,
+  getMcpConfigs: mocks.getMcpConfigs,
   promptForMcpEnv: mocks.promptForMcpEnv,
 }));
 
@@ -45,6 +47,7 @@ describe('MCP install and scope flow', () => {
     mocks.getAllAdapters.mockReset();
     mocks.resolveAdapters.mockReset();
     mocks.getMcpConfig.mockReset();
+    mocks.getMcpConfigs.mockReset();
     mocks.promptForMcpEnv.mockReset();
     mocks.handleProjectGitTracking.mockReset();
 
@@ -79,7 +82,7 @@ describe('MCP install and scope flow', () => {
     const codex = fakeAgent('codex', 'Codex (OpenAI)');
     const config = mcpConfig('demo-mcp', ['server.js']);
     mocks.resolveAdapters.mockResolvedValue([antigravity, claude, codex]);
-    mocks.getMcpConfig.mockResolvedValue(config);
+    mocks.getMcpConfigs.mockResolvedValue([config]);
     mocks.promptForMcpEnv.mockResolvedValue({ TOKEN: 'secret' });
 
     await installMcpService('github.com/acme/demo-mcp', { scope: 'project', agent: 'all' });
@@ -107,7 +110,7 @@ describe('MCP install and scope flow', () => {
     const claude = fakeAgent('claude-code', 'Claude Code');
     const config = mcpConfig('global-mcp', ['server.js']);
     mocks.resolveAdapters.mockResolvedValue([antigravity, claude]);
-    mocks.getMcpConfig.mockResolvedValue(config);
+    mocks.getMcpConfigs.mockResolvedValue([config]);
     mocks.promptForMcpEnv.mockResolvedValue({});
 
     await installMcpService('github.com/acme/global-mcp', { scope: 'global', agent: 'all' });
@@ -117,6 +120,24 @@ describe('MCP install and scope flow', () => {
     const row = await getMcpRow('global-mcp', 'global', '');
     expect(row.assigned_agents).toBe('all');
     await expect(getMcpRow('global-mcp', 'project', projectA)).rejects.toThrow('Missing MCP row');
+  });
+
+  it('installs every MCP config returned from a multi-project source', async () => {
+    const { installMcpService } = await import('../src/core/mcp.js');
+    const codex = fakeAgent('codex', 'Codex (OpenAI)');
+    const alpha = { ...mcpConfig('alpha-mcp', ['alpha.js']), source: 'github.com/acme/mcps#alpha' };
+    const beta = { ...mcpConfig('beta-mcp', ['beta.js']), source: 'github.com/acme/mcps#beta' };
+    mocks.resolveAdapters.mockResolvedValue([codex]);
+    mocks.getMcpConfigs.mockResolvedValue([alpha, beta]);
+    mocks.promptForMcpEnv.mockResolvedValue({});
+
+    await installMcpService('github.com/acme/mcps', { scope: 'project', agent: 'codex' });
+
+    expect(codex.configureMCP).toHaveBeenCalledTimes(2);
+    expect(codex.configureMCP).toHaveBeenCalledWith(alpha, {}, 'project');
+    expect(codex.configureMCP).toHaveBeenCalledWith(beta, {}, 'project');
+    expect((await getMcpRow('alpha-mcp', 'project', projectA)).source).toBe('github.com/acme/mcps#alpha');
+    expect((await getMcpRow('beta-mcp', 'project', projectA)).source).toBe('github.com/acme/mcps#beta');
   });
 
   it('syncs only the current project scope and preserves other scopes', async () => {
@@ -258,6 +279,73 @@ describe('MCP install and scope flow', () => {
 
     await expect(getMcpRow('demo-mcp', 'project', projectA)).rejects.toThrow('Missing MCP row');
     expect((await getMcpRow('demo-mcp', 'global', '')).source).toBe('global-source');
+  });
+
+  it('promotes one project MCP assignment without deleting the remaining project row', async () => {
+    const { promoteMcpService } = await import('../src/core/mcp.js');
+    const claude = fakeAgent('claude-code', 'Claude Code');
+    const codex = fakeAgent('codex', 'Codex (OpenAI)');
+    await seedMcp({
+      name: 'demo-mcp',
+      source: 'project-source',
+      scope: 'project',
+      projectPath: projectA,
+      assignedAgents: JSON.stringify(['claude-code', 'codex']),
+      args: ['project.js'],
+    });
+    mocks.resolveAdapters.mockResolvedValue([claude]);
+
+    await promoteMcpService('demo-mcp', { agent: 'claude-code' });
+
+    expect(claude.configureMCP).toHaveBeenCalledWith(
+      expect.objectContaining({ name: 'demo-mcp', args: ['project.js'] }),
+      {},
+      'global'
+    );
+    expect(claude.removeMCP).toHaveBeenCalledWith('demo-mcp', 'project');
+    expect(JSON.parse((await getMcpRow('demo-mcp', 'project', projectA)).assigned_agents))
+      .toEqual(['codex']);
+    expect(JSON.parse((await getMcpRow('demo-mcp', 'global', '')).assigned_agents))
+      .toEqual(['claude-code']);
+  });
+
+  it('demotes global MCPs only to project-capable agents and keeps unsupported agents global', async () => {
+    const { demoteMcpService } = await import('../src/core/mcp.js');
+    const antigravity = fakeAgent('antigravity', 'Antigravity 2.0 / Editor');
+    const claude = fakeAgent('claude-code', 'Claude Code');
+    const codex = fakeAgent('codex', 'Codex (OpenAI)');
+    await seedMcp({
+      name: 'demo-mcp',
+      source: 'global-source',
+      scope: 'global',
+      projectPath: '',
+      assignedAgents: 'all',
+      args: ['global.js'],
+    });
+    mocks.resolveAdapters.mockResolvedValue([antigravity, claude, codex]);
+    mocks.detectAgents.mockResolvedValue([antigravity, claude, codex]);
+
+    await demoteMcpService('demo-mcp', { agent: 'all' });
+
+    expect(antigravity.configureMCP).not.toHaveBeenCalled();
+    expect(antigravity.removeMCP).not.toHaveBeenCalled();
+    expect(claude.configureMCP).toHaveBeenCalledWith(
+      expect.objectContaining({ name: 'demo-mcp', args: ['global.js'] }),
+      {},
+      'project'
+    );
+    expect(codex.configureMCP).toHaveBeenCalledWith(
+      expect.objectContaining({ name: 'demo-mcp', args: ['global.js'] }),
+      {},
+      'project'
+    );
+    expect(claude.removeMCP).toHaveBeenCalledWith('demo-mcp', 'global');
+    expect(codex.removeMCP).toHaveBeenCalledWith('demo-mcp', 'global');
+    expect(JSON.parse((await getMcpRow('demo-mcp', 'project', projectA)).assigned_agents))
+      .toEqual(['claude-code', 'codex']);
+    expect(JSON.parse((await getMcpRow('demo-mcp', 'global', '')).assigned_agents))
+      .toEqual(['antigravity']);
+    expect(mocks.handleProjectGitTracking).toHaveBeenCalledTimes(1);
   });
 });
 

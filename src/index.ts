@@ -30,6 +30,7 @@ import {
   removeMcpService,
   syncMcpServices,
   promoteMcpService,
+  demoteMcpService,
 } from './core/mcp.js';
 import { configureGitPreference } from './core/git_config.js';
 import { syncAgents, showAgentConfig, promoteSkillToGlobal, demoteSkillToProject } from './core/sync.js';
@@ -377,7 +378,7 @@ promoteCmd
 // ── demote ────────────────────────────────────────────────────
 const demoteCmd = program
   .command('demote')
-  .description('Demote global-scoped skills to project scope');
+  .description('Demote global-scoped skills or MCP services to project scope');
 
 demoteCmd
   .command('skill <skill-name>')
@@ -387,6 +388,16 @@ demoteCmd
   .action(async (skillName: string, opts: Record<string, unknown>) => {
     await demoteSkillToProject(skillName, {
       mode: installModeOption(opts['mode']),
+      agent: opts['agent'] as AgentType | 'all',
+    });
+  });
+
+demoteCmd
+  .command('mcp <name>')
+  .description('Demote a global MCP service to project scope')
+  .option('--agent <agent>', 'Target agent (or "all")', 'all')
+  .action(async (name: string, opts: Record<string, unknown>) => {
+    await demoteMcpService(name, {
       agent: opts['agent'] as AgentType | 'all',
     });
   });

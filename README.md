@@ -224,6 +224,8 @@ skm install https://github.com/team/workflow-skill#skills/reviewer@v1.0.0
 skm install https://gitlab.com/example-org/workflow-skill.git#v1.0.0
 ```
 
+When a repository contains multiple `SKILL.md` files, `skm install` opens a searchable terminal picker. Type part of a skill name or path to filter the list, leave the search blank to show everything, or choose `Select all ... shown` to install every currently visible match.
+
 ## Search, Preview, and Security Review
 
 ```bash
@@ -276,6 +278,9 @@ skm mcp add https://github.com/modelcontextprotocol/servers#src/memory --agent c
 # Install a project-scoped MCP
 skm mcp add https://github.com/jgraph/drawio-mcp#mcp-tool-server --scope project --agent codex
 
+# If a Git MCP repository contains multiple server projects, search and select one or many
+skm mcp add https://github.com/team/mcp-servers --scope project
+
 # Interactively choose which agents receive an MCP
 skm assign
 
@@ -284,6 +289,8 @@ skm mcp sync --scope global --agent all
 ```
 
 MCPs are recorded with `scope`, `project_path`, and target agents, so they can be promoted, demoted, synced, or reassigned later.
+
+For MCP monorepos, the installer uses the same searchable picker as skill installation and includes `Select all ... shown` so you can install every visible MCP project in one pass. Each selected MCP is tracked separately with its own source fragment.
 
 ## `SKILL.md` and `skm.mod`
 
@@ -410,6 +417,7 @@ skm mcp status         Check MCP availability
 skm promote skill <n>  Promote a project skill to global scope
 skm demote skill <n>   Demote a global skill into the current project
 skm promote mcp <n>    Promote a project MCP to global scope
+skm demote mcp <n>     Demote a global MCP into the current project
 
 skm tree               Show dependency tree
 skm verify             Verify integrity

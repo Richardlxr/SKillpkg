@@ -224,6 +224,8 @@ skm install https://github.com/team/workflow-skill#skills/reviewer@v1.0.0
 skm install https://gitlab.com/example-org/workflow-skill.git#v1.0.0
 ```
 
+当仓库里有多个 `SKILL.md` 时，`skm install` 会打开可检索的终端选择器。可以输入 skill 名称或路径的一部分来过滤，留空显示全部，也可以选择 `Select all ... shown` 一次安装当前可见的全部匹配项。
+
 ## 查找、预览与安全审查
 
 ```bash
@@ -276,6 +278,9 @@ skm mcp add https://github.com/modelcontextprotocol/servers#src/memory --agent c
 # 为当前项目安装项目级 MCP
 skm mcp add https://github.com/jgraph/drawio-mcp#mcp-tool-server --scope project --agent codex
 
+# 如果 Git MCP 仓库里有多个 server 项目，可以检索并选择一个或多个
+skm mcp add https://github.com/team/mcp-servers --scope project
+
 # 交互式选择 MCP 应注入哪些 Agent
 skm assign
 
@@ -284,6 +289,8 @@ skm mcp sync --scope global --agent all
 ```
 
 MCP 会和 skill 一样记录 `scope`、`project_path` 与目标 Agent，可以后续提升、降级、同步或重新分配。
+
+对于 MCP monorepo，安装器会使用和 skill 安装相同的可检索选择器，并提供 `Select all ... shown`，可以一次安装当前可见的全部 MCP 项目。每个选中的 MCP 都会用自己的 source fragment 单独记录。
 
 ## `SKILL.md` 与 `skm.mod`
 
@@ -410,6 +417,7 @@ skm mcp status         检查 MCP 可用性
 skm promote skill <n>  将项目级 skill 提升为全局级
 skm demote skill <n>   将全局级 skill 降到当前项目
 skm promote mcp <n>    将项目级 MCP 提升为全局级
+skm demote mcp <n>     将全局级 MCP 降到当前项目
 
 skm tree               显示依赖树
 skm verify             验证完整性
