@@ -8,7 +8,6 @@ import { listSubdirs, pathExists, readFileOrNull, writeFileSafe } from '../utils
 import { parseSkillMd } from '../parsers/index.js';
 import { logger } from '../utils/logger.js';
 import { mcpServerNameCandidates, toMcpServerName } from '../utils/mcp_names.js';
-import { normalizeMcpArgs } from '../utils/mcp_paths.js';
 import { BaseAdapter } from './base.js';
 
 export class CodexAdapter extends BaseAdapter {
@@ -56,7 +55,6 @@ export class CodexAdapter extends BaseAdapter {
     const next = upsertCodexMcpBlock(existing || '', {
       ...mcp,
       name: serverName,
-      args: await normalizeMcpArgs(mcp.args || []),
     }, env || {}, mcp.name);
     await writeFileSafe(configPath, next);
     logger.agent(this.displayName, `Configured MCP: ${serverName}`);

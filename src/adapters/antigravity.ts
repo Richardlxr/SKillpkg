@@ -4,7 +4,6 @@
 import type { AgentType, InstallScope, McpRegistryEntry, DiscoveredMcp } from '../types/index.js';
 import { AGENT_PATHS } from '../utils/platform.js';
 import { pathExists, readJsonFile, writeJsonFile } from '../utils/fs.js';
-import { normalizeMcpArgs } from '../utils/mcp_paths.js';
 import { logger } from '../utils/logger.js';
 import { BaseAdapter } from './base.js';
 
@@ -37,7 +36,7 @@ export class AntigravityAdapter extends BaseAdapter {
       }
       : {
         command: mcp.command,
-        args: await normalizeMcpArgs(mcp.args || []),
+        args: mcp.args || [],
         ...(env && Object.keys(env).length > 0 ? { env: env } : {}),
       };
 

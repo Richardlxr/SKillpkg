@@ -1,8 +1,7 @@
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
-import { basename } from 'node:path';
+import { basename, isAbsolute } from 'node:path';
 import { pathExists } from './fs.js';
-import { isLikelyLocalPath, normalizeSkillpkgDataPath } from './mcp_paths.js';
 
 const execFileAsync = promisify(execFile);
 
@@ -28,14 +27,9 @@ export async function checkMcpService(service: McpStatusService): Promise<McpSta
 
   const entrypoint = entrypointArg(command, service.args || []);
   if (entrypoint && !(await pathExists(entrypoint))) {
-    const migratedEntrypoint = await normalizeSkillpkgDataPath(entrypoint);
-    const migrationDetail = migratedEntrypoint !== entrypoint
-      ? `; migrated path exists: ${migratedEntrypoint}`
-      : '';
-
     return {
       available: false,
-      detail: `entrypoint not found: ${entrypoint}${migrationDetail}`,
+      detail: `entrypoint not found: ${entrypoint}`,
     };
   }
 
@@ -82,4 +76,12 @@ function firstPathArg(args: string[], extensions: string[]): string | null {
   }
 
   return null;
+}
+
+function isLikelyLocalPath(value: string): boolean {
+  return isAbsolute(value) ||
+    value.startsWith('./') ||
+    value.startsWith('../') ||
+    value.startsWith('.\\') ||
+    value.startsWith('..\\');
 }
