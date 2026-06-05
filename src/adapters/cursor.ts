@@ -4,6 +4,7 @@
 import type { AgentType, InstallScope, McpRegistryEntry, DiscoveredMcp } from '../types/index.js';
 import { AGENT_PATHS } from '../utils/platform.js';
 import { pathExists, readJsonFile, writeJsonFile } from '../utils/fs.js';
+import { normalizeMcpArgs } from '../utils/mcp_paths.js';
 import { logger } from '../utils/logger.js';
 import { BaseAdapter } from './base.js';
 
@@ -38,7 +39,7 @@ export class CursorAdapter extends BaseAdapter {
       : {
         type: 'stdio',
         command: mcp.command,
-        args: mcp.args || [],
+        args: await normalizeMcpArgs(mcp.args || []),
         env: env || {},
       };
 

@@ -5,19 +5,16 @@
  * with project/global scope so they can be promoted and re-applied to agents.
  */
 import chalk from 'chalk';
-import { execFile } from 'node:child_process';
-import { dirname, isAbsolute, join, relative, resolve } from 'node:path';
-import { promisify } from 'node:util';
+import { dirname, join, relative, resolve } from 'node:path';
 import type Database from 'better-sqlite3';
 import { getDb, genId } from '../db/index.js';
 import { detectAgents, getAllAdapters, resolveAdapters } from '../adapters/index.js';
 import { logger } from '../utils/logger.js';
 import { pathExists, readFileOrNull, readJsonFile } from '../utils/fs.js';
 import { looksLikeMcpAppName, toMcpServerName } from '../utils/mcp_names.js';
+import { checkMcpService } from '../utils/mcp_status.js';
 import { AGENT_PATHS, getDataDir } from '../utils/platform.js';
 import type { AgentAdapter, AgentType, DiscoveredMcp, InstallScope, McpRegistryEntry } from '../types/index.js';
-
-const execFileAsync = promisify(execFile);
 
 type TargetAgent = AgentType | 'all';
 
@@ -945,10 +942,20 @@ export async function checkMcpStatus(): Promise<void> {
   ]);
   const extraFromConfig = configMcps.filter((m) => !dbNames.has(m.name));
 
-  const allServices: { name: string; command: string; type?: string }[] = [
-    ...managedRows.map((r) => ({ name: r.name, command: r.command, type: r.type })),
-    ...skillRows.map((r) => ({ name: r['name'] as string, command: r['command'] as string })),
-    ...extraFromConfig.map((m) => ({ name: m.name, command: m.command })),
+  const allServices: { name: string; command: string; args?: string[]; type?: string }[] = [
+    ...managedRows.map((r) => ({
+      name: r.name,
+      command: r.command,
+      args: parseJsonValue<string[]>(r.args, []),
+      type: r.type,
+    })),
+    ...skillRows.map((r) => ({
+      name: r['name'] as string,
+      command: r['command'] as string,
+      args: parseJsonValue<string[]>(r['args'] as string, []),
+      type: r['type'] as string | undefined,
+    })),
+    ...extraFromConfig.map((m) => ({ name: m.name, command: m.command, args: m.args })),
   ];
 
   if (allServices.length === 0) {
@@ -957,7 +964,7 @@ export async function checkMcpStatus(): Promise<void> {
   }
 
   const uniqueServices = Array.from(
-    new Map(allServices.map((s) => [`${s.name}:${s.command}`, s])).values()
+    new Map(allServices.map((s) => [`${s.name}:${s.command}:${(s.args || []).join('\0')}`, s])).values()
   );
 
   logger.blank();
@@ -970,14 +977,13 @@ export async function checkMcpStatus(): Promise<void> {
       continue;
     }
 
-    let available = false;
-    available = await isCommandAvailable(svc.command);
+    const result = await checkMcpService(svc);
 
-    const status = available
+    const status = result.available
       ? chalk.green('✔ available')
       : chalk.red('✖ not found');
 
-    console.log(`  ${svc.name.padEnd(25)} ${status}  ${chalk.gray(`(${svc.command})`)}`);
+    console.log(`  ${svc.name.padEnd(25)} ${status}  ${chalk.gray(`(${result.detail})`)}`);
   }
 
   logger.blank();
@@ -989,19 +995,4 @@ export async function checkMcpStatus(): Promise<void> {
     console.log(`  ${agent.displayName.padEnd(25)} ${chalk.green('✔ detected')}`);
   }
   logger.blank();
-}
-
-async function isCommandAvailable(command: string): Promise<boolean> {
-  if (!command) return false;
-  if (isAbsolute(command) || command.includes('/') || command.includes('\\')) {
-    return pathExists(command);
-  }
-
-  const checker = process.platform === 'win32' ? 'where' : 'which';
-  try {
-    await execFileAsync(checker, [command], { windowsHide: true });
-    return true;
-  } catch {
-    return false;
-  }
 }
