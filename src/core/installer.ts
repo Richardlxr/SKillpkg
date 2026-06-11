@@ -16,7 +16,7 @@ import type {
   AgentType,
   InstallScope,
 } from '../types/index.js';
-import { formatSourceForDisplay, parseSourceString, parseSkillMd } from '../parsers/index.js';
+import { assertValidSkillName, formatSourceForDisplay, parseSourceString, parseSkillMd } from '../parsers/index.js';
 import { cloneOrPull, getCommitSha, checkout } from '../utils/git.js';
 import { pathExists, isDirectory } from '../utils/fs.js';
 import { getDefaultConfig, unifiedProjectSkillsDir } from '../utils/platform.js';
@@ -25,7 +25,7 @@ import { promptForSearchableSelection } from '../utils/searchable_selection.js';
 import { getDb, genId } from '../db/index.js';
 import { getAllAdapters, resolveAdapters } from '../adapters/index.js';
 import { applyReplaceDirectives } from './replace.js';
-import { runSetup } from './hooks.js';
+import { getSetupHookDisplay, runSetup } from './hooks.js';
 import { loadSumfile, saveSumfile, updateSumfileEntry, computeIntegrity } from './sumfile.js';
 import { logger } from '../utils/logger.js';
 import {
@@ -155,6 +155,7 @@ export async function installSkill(
 
     const commit = await getCommitSha(repoDir);
     const skillName = options.alias || frontmatter.name;
+    assertValidSkillName(skillName);
 
     // 7. Conflict detection
     const db = await getDb();
@@ -224,11 +225,20 @@ export async function installSkill(
 
     // 11. Run setup hook
     if (!options.noScripts) {
-      spinner.text = 'Running setup...';
-      const ok = await runSetup(frontmatter.setup_command, skillDir, skillName);
-      if (!ok && !options.force) {
-        spinner.fail('setup failed. Use --force to skip.');
-        return;
+      const setupHookDisplay = await getSetupHookDisplay(frontmatter.setup_command, skillDir);
+      if (setupHookDisplay) {
+        spinner.stop();
+      }
+      if (setupHookDisplay && await shouldRunRemoteSetupHook(skillName, setupHookDisplay, options)) {
+        spinner.text = 'Running setup...';
+        spinner.start();
+        const ok = await runSetup(frontmatter.setup_command, skillDir, skillName);
+        if (!ok && !options.force) {
+          spinner.fail('setup failed. Use --force to skip.');
+          return;
+        }
+      } else if (setupHookDisplay) {
+        spinner.start();
       }
     }
 
@@ -248,6 +258,7 @@ export async function installSkill(
           agent: options.agent,
           force: true,
           noScripts: options.noScripts,
+          runScripts: options.runScripts,
           save: false,
           saveToMod: false,
         });
@@ -275,8 +286,12 @@ export async function installSkill(
     const assignedAgents = targetAgent === 'all'
       ? 'all'
       : JSON.stringify(adapters.map((adapter) => adapter.name));
+    let actualInstallMode = installMode;
     for (const adapter of adapters) {
-      await adapter.installSkill(skillPkg, scope, { installMode });
+      const adapterInstallMode = await adapter.installSkill(skillPkg, scope, { installMode });
+      if (adapterInstallMode !== installMode) {
+        actualInstallMode = 'copy';
+      }
 
       // Configure MCP services
       if (frontmatter.mcp?.length) {
@@ -296,8 +311,8 @@ export async function installSkill(
       .get(skillName, scope, projectPath) as { id: string } | undefined;
 
     let installedSkillId: string;
-    const symlinkTarget = isSymlinkInstallMode(installMode) ? skillDir : null;
-    const isLinked = legacyIsLinkedValue(installMode);
+    const symlinkTarget = isSymlinkInstallMode(actualInstallMode) ? skillDir : null;
+    const isLinked = legacyIsLinkedValue(actualInstallMode);
     const unifiedPath = scope === 'project'
       ? join(unifiedProjectSkillsDir(projectPath), skillName)
       : null;
@@ -313,7 +328,7 @@ export async function installSkill(
         installSource, commit, frontmatter.version || '0.0.0',
         frontmatter.description || '', projectPath, options.alias || null,
         skillDir, unifiedPath, symlinkTarget, integrity,
-        installMode, isLinked, assignedAgents, now, existingRow.id
+        actualInstallMode, isLinked, assignedAgents, now, existingRow.id
       );
       installedSkillId = existingRow.id;
     } else {
@@ -326,7 +341,7 @@ export async function installSkill(
         installedSkillId, skillName, installSource, commit,
         frontmatter.version || '0.0.0', frontmatter.description || '',
         scope, projectPath, options.alias || null, skillDir, unifiedPath, symlinkTarget, integrity,
-        installMode, isLinked, now, now, assignedAgents
+        actualInstallMode, isLinked, now, now, assignedAgents
       );
     }
 
@@ -403,6 +418,35 @@ async function promptForSelectedSkills(repoDir: string, foundSkills: string[]): 
     noMatchesMessage: (query) => `No skills matched "${query}". Try another keyword or leave blank to show all.`,
     includeSelectAll: true,
   });
+}
+
+async function shouldRunRemoteSetupHook(
+  skillName: string,
+  setupHookDisplay: string,
+  options: InstallOptions
+): Promise<boolean> {
+  if (options.runScripts || options.yes) {
+    return true;
+  }
+
+  if (process.stdin.isTTY && process.stdout.isTTY) {
+    const { default: inquirer } = await import('inquirer');
+    const { runRemoteSetup } = await inquirer.prompt<{ runRemoteSetup: boolean }>([{
+      type: 'confirm',
+      name: 'runRemoteSetup',
+      message: `Run setup for remote skill "${skillName}"? ${setupHookDisplay}`,
+      default: false,
+    }]);
+    if (runRemoteSetup) {
+      return true;
+    }
+  }
+
+  logger.warn(
+    `Skipped setup for remote skill "${skillName}". ` +
+    `Review it first, then reinstall with --run-scripts to execute: ${setupHookDisplay}`
+  );
+  return false;
 }
 
 async function buildSkillSelectionChoices(repoDir: string, foundSkills: string[]): Promise<SkillSelectionChoice[]> {

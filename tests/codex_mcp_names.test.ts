@@ -69,4 +69,29 @@ describe('Codex MCP server names', () => {
     await adapter.removeMCP('@drawio/mcp', 'project');
     await expect(readFile(configPath, 'utf-8')).resolves.not.toContain('drawio-mcp');
   });
+
+  it('removes MCP blocks whose TOML table header has a trailing comment', async () => {
+    const configPath = join(projectDir, '.codex', 'config.toml');
+    await mkdir(join(projectDir, '.codex'), { recursive: true });
+    await writeFile(configPath, [
+      '[mcp_servers.demo] # added manually',
+      'command = "node" # keep value comment legal',
+      'args = ["old.js"] # old args',
+      'enabled = true',
+      '',
+      '[mcp_servers.keep]',
+      'command = "node"',
+      'args = ["keep.js"]',
+      'enabled = true',
+      '',
+    ].join('\n'));
+
+    const adapter = new CodexAdapter();
+    await adapter.removeMCP('demo', 'project');
+
+    const config = await readFile(configPath, 'utf-8');
+    expect(config).not.toContain('[mcp_servers.demo]');
+    expect(config).toContain('[mcp_servers.keep]');
+    expect(config).toContain('keep.js');
+  });
 });

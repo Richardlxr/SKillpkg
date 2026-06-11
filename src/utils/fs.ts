@@ -1,9 +1,10 @@
 /**
  * File system helpers for cross-platform operations
  */
-import { mkdir, readFile, writeFile, rm, access, readdir, stat, cp, symlink, lstat, readlink } from 'node:fs/promises';
+import { mkdir, readFile, writeFile, rm, access, readdir, stat, cp, symlink, lstat, readlink, realpath } from 'node:fs/promises';
 import { join, dirname, relative, resolve, normalize, toNamespacedPath } from 'node:path';
 import { constants } from 'node:fs';
+import { logger } from './logger.js';
 
 /** Ensure a directory exists (recursive) */
 export async function ensureDir(dirPath: string): Promise<void> {
@@ -75,6 +76,19 @@ export async function readJsonFile<T = unknown>(filePath: string): Promise<T | n
   }
 }
 
+/** Read JSON for read-modify-write flows; missing files start empty, invalid files abort. */
+export async function readJsonFileForUpdate<T = Record<string, unknown>>(filePath: string): Promise<T> {
+  try {
+    const content = await readFile(filePath, 'utf-8');
+    return JSON.parse(content) as T;
+  } catch (err) {
+    if (isNodeError(err) && err.code === 'ENOENT') {
+      return {} as T;
+    }
+    throw new Error(`Failed to read JSON config ${filePath}: ${(err as Error).message}`);
+  }
+}
+
 /** Write JSON to a file with formatting */
 export async function writeJsonFile(filePath: string, data: unknown): Promise<void> {
   await writeFileSafe(filePath, JSON.stringify(data, null, 2) + '\n');
@@ -84,15 +98,38 @@ export async function writeJsonFile(filePath: string, data: unknown): Promise<vo
 export async function removePath(p: string): Promise<void> {
   try {
     await rm(p, { recursive: true, force: true });
-  } catch {
-    // Ignore errors
+  } catch (err) {
+    if (isNodeError(err) && err.code === 'ENOENT') return;
+    logger.warn(`Failed to remove ${p}: ${(err as Error).message}`);
+    throw err;
   }
 }
 
+export interface CopyDirOptions {
+  dereference?: boolean;
+}
+
 /** Copy directory recursively */
-export async function copyDir(src: string, dest: string): Promise<void> {
+export async function copyDir(src: string, dest: string, options: CopyDirOptions = {}): Promise<void> {
   await ensureDir(dirname(dest));
-  await cp(src, dest, { recursive: true, force: true, dereference: true });
+  const source = await copySourceRoot(src, options);
+  await cp(source, dest, {
+    recursive: true,
+    force: true,
+    dereference: options.dereference ?? false,
+    verbatimSymlinks: options.dereference ? false : true,
+  });
+}
+
+async function copySourceRoot(src: string, options: CopyDirOptions): Promise<string> {
+  if (options.dereference) return src;
+
+  try {
+    const sourceStat = await lstat(src);
+    return sourceStat.isSymbolicLink() ? await realpath(src) : src;
+  } catch {
+    return src;
+  }
 }
 
 export function directorySymlinkType(platform: NodeJS.Platform = process.platform): 'dir' | 'junction' {
@@ -146,6 +183,10 @@ export async function ensureDirectorySymlink(linkPath: string, target: string): 
 
 function comparablePath(p: string): string {
   return normalize(toNamespacedPath(resolve(p)));
+}
+
+function isNodeError(err: unknown): err is NodeJS.ErrnoException {
+  return err instanceof Error && 'code' in err;
 }
 
 /** List subdirectories in a directory */

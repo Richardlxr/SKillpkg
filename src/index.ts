@@ -77,6 +77,7 @@ program
   .option('--agent <agent>', 'Target agent (or "all")', 'all')
   .option('--no-deps', 'Skip dependency installation')
   .option('--no-scripts', 'Skip lifecycle hooks')
+  .option('--run-scripts', 'Run lifecycle hooks from remote skills after review')
   .option('--save', 'Save project install to skm.mod')
   .option('--no-save', 'Do not save project install to skm.mod')
   .option('-f, --force', 'Force install even if already exists')
@@ -90,6 +91,7 @@ program
         agent: (opts['agent'] as AgentType | 'all') || 'all',
         noDeps: opts['deps'] === false,
         noScripts: opts['scripts'] === false,
+        runScripts: opts['runScripts'] as boolean,
         force: opts['force'] as boolean,
         yes: opts['yes'] as boolean,
         save: false,
@@ -105,6 +107,7 @@ program
       agent: (opts['agent'] as AgentType | 'all') || 'all',
       noDeps: opts['deps'] === false,
       noScripts: opts['scripts'] === false,
+      runScripts: opts['runScripts'] as boolean,
       force: opts['force'] as boolean,
       yes: opts['yes'] as boolean,
       save: opts['save'] as boolean | undefined,
@@ -470,7 +473,10 @@ configCmd
 
 // ── cleanup on exit ────────────────────────────────────────────
 process.on('exit', () => closeDb());
-process.on('SIGINT', () => { closeDb(); process.exit(0); });
+process.on('SIGINT', () => {
+  closeDb();
+  process.exit(130);
+});
 
 // ── run ────────────────────────────────────────────────────────
 program.parse();

@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { mkdir, mkdtemp, readFile, rm } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { AntigravityCliAdapter } from '../src/adapters/antigravity-cli.js';
@@ -97,6 +97,55 @@ describe('remote MCP config', () => {
     const antigravity = await readJson(join(projectDir, '.agents', 'mcp_config.json'));
     expect(antigravity['mcpServers']).toMatchObject({
       'asana-com': { serverUrl: 'https://mcp.asana.com/sse' },
+    });
+  });
+
+  it('does not overwrite Claude global config when it cannot be parsed', async () => {
+    const configPath = join(process.env['HOME'] as string, '.claude.json');
+    await mkdir(join(process.env['HOME'] as string), { recursive: true });
+    await writeFile(configPath, '{ invalid json');
+
+    await expect(new ClaudeCodeAdapter().configureMCP({
+      name: 'draw-io',
+      command: 'npx',
+      args: ['draw-io'],
+      envKeys: [],
+    }, {}, 'global')).rejects.toThrow(/Failed to read JSON config/);
+
+    expect(await readFile(configPath, 'utf-8')).toBe('{ invalid json');
+  });
+
+  it('removes legacy Claude project MCP entries from ~/.claude.json', async () => {
+    await new ClaudeCodeAdapter().configureMCP({
+      name: 'draw-io',
+      command: 'npx',
+      args: ['draw-io'],
+      envKeys: [],
+    }, {}, 'project');
+
+    const globalConfigPath = join(process.env['HOME'] as string, '.claude.json');
+    await mkdir(join(process.env['HOME'] as string), { recursive: true });
+    await writeFile(globalConfigPath, JSON.stringify({
+      oauthAccount: { id: 'keep' },
+      projects: {
+        [projectDir]: {
+          mcpServers: {
+            'draw-io': { command: 'old', args: [] },
+            keep: { command: 'node', args: ['keep.js'] },
+          },
+        },
+      },
+    }, null, 2));
+
+    await new ClaudeCodeAdapter().removeMCP('draw-io', 'project');
+
+    const projectConfig = await readJson(join(projectDir, '.mcp.json'));
+    expect(projectConfig['mcpServers']).toEqual({});
+
+    const globalConfig = await readJson(globalConfigPath);
+    expect(globalConfig['oauthAccount']).toEqual({ id: 'keep' });
+    expect((globalConfig['projects'] as Record<string, any>)[projectDir]['mcpServers']).toEqual({
+      keep: { command: 'node', args: ['keep.js'] },
     });
   });
 });

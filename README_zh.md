@@ -102,6 +102,8 @@ skm install owner/repo -y --agent all
 
 当仓库里包含多个 skills 时，交互式安装会先询问一个可选的 name/path 关键词。直接回车会展示全部 skills；输入 `reviewer` 之类的关键词后，再从过滤后的复选列表里选择要安装的项。
 
+远程 skill 的 setup hook 默认需要确认。远程 skill 声明 `setup_command` 或包含 setup 脚本时，交互式终端会先询问，非交互环境会跳过。审查后可用 `--run-scripts` 执行，`--no-scripts` 始终跳过，受信任自动化场景可用 `-y`。
+
 支持的 Agent id：
 
 ```text
@@ -418,7 +420,7 @@ skm track [name]       将未托管的原生 skill 纳入 skm 管理，不自动
 skm assign             交互式把 skill/MCP 分配到指定 Agent
 skm status             查看 scope、完整性与 Agent 注入状态
 
-skm install <source>   从 Git 源或本地路径安装 skill（--no-save 可仅本地项目使用）
+skm install <source>   从 Git 源或本地路径安装 skill（审查后用 --run-scripts）
 skm install            从 skm.mod 安装 skill/MCP 到项目级
 skm uninstall <name>   卸载 skill（默认优先卸载当前项目同名 skill）
 skm info <name>        查看某个 skill 的详细信息

@@ -1,10 +1,11 @@
 /**
  * Base Agent Adapter with shared logic
  */
-import { join, resolve } from 'node:path';
+import { isAbsolute, join, relative, resolve } from 'node:path';
 import type {
   AgentAdapter,
   AgentType,
+  InstallMode,
   InstallScope,
   InstalledSkillInfo,
   McpRegistryEntry,
@@ -23,7 +24,7 @@ import {
   ensureDirectorySymlink,
   pathExistsNoFollow,
 } from '../utils/fs.js';
-import { parseSkillMd } from '../parsers/index.js';
+import { assertValidSkillName, parseSkillMd } from '../parsers/index.js';
 import { logger } from '../utils/logger.js';
 import { isSymlinkInstallMode } from '../utils/install_mode.js';
 import { AGENT_PATHS } from '../utils/platform.js';
@@ -53,16 +54,16 @@ export abstract class BaseAdapter implements AgentAdapter {
   abstract listConfiguredMCPs(): Promise<DiscoveredMcp[]>;
 
   /** Install a skill into an agent's skills directory */
-  async installSkill(skill: SkillPackage, scope: InstallScope, options: SkillInstallOptions = {}): Promise<void> {
+  async installSkill(skill: SkillPackage, scope: InstallScope, options: SkillInstallOptions = {}): Promise<InstallMode> {
     const skillsDir = this.getSkillsDir(scope);
     await ensureDir(skillsDir);
     await this.ensureAgentSymlink(scope);
 
-    const targetDir = join(skillsDir, skill.frontmatter.name);
+    const targetDir = safeSkillTargetDir(skillsDir, skill.frontmatter.name);
 
     if (resolve(skill.localPath) === resolve(targetDir)) {
       logger.agent(this.displayName, `Using existing ${skill.frontmatter.name} → ${targetDir}`);
-      return;
+      return options.installMode || 'copy';
     }
 
     // Remove existing if present
@@ -74,11 +75,18 @@ export abstract class BaseAdapter implements AgentAdapter {
       const linked = await createSymlinkOrCopy(skill.localPath, targetDir);
       const verb = linked ? 'Linked' : 'Installed';
       logger.agent(this.displayName, `${verb} ${skill.frontmatter.name} → ${targetDir}`);
-      return;
+      if (!linked) {
+        logger.warn(
+          `${this.displayName} could not create a ${options.installMode} link for "${skill.frontmatter.name}"; ` +
+          'recording the install as a copy.'
+        );
+      }
+      return linked ? options.installMode : 'copy';
     }
 
     await copyDir(skill.localPath, targetDir);
     logger.agent(this.displayName, `Installed ${skill.frontmatter.name} → ${targetDir}`);
+    return 'copy';
   }
 
   /** Ensure project-only compatibility paths point at the unified .agents/skills directory. */
@@ -113,7 +121,7 @@ export abstract class BaseAdapter implements AgentAdapter {
   /** Uninstall a skill */
   async uninstallSkill(skillName: string, scope: InstallScope): Promise<void> {
     const skillsDir = this.getSkillsDir(scope);
-    const targetDir = join(skillsDir, skillName);
+    const targetDir = safeSkillTargetDir(skillsDir, skillName);
 
     if (await pathExists(targetDir)) {
       await removePath(targetDir);
@@ -206,4 +214,18 @@ export abstract class BaseAdapter implements AgentAdapter {
     }
     return removed;
   }
+}
+
+function safeSkillTargetDir(skillsDir: string, skillName: string): string {
+  assertValidSkillName(skillName);
+
+  const root = resolve(skillsDir);
+  const target = resolve(root, skillName);
+  const pathFromRoot = relative(root, target);
+
+  if (!pathFromRoot || pathFromRoot.startsWith('..') || isAbsolute(pathFromRoot)) {
+    throw new Error(`Skill path escapes the skills directory: ${skillName}`);
+  }
+
+  return target;
 }
