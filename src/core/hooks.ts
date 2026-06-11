@@ -81,6 +81,13 @@ export async function runSetup(
   }
 }
 
+export async function getSetupHookDisplay(
+  setupCommand: string | undefined,
+  cwd: string
+): Promise<string | null> {
+  return (await resolveSetupHook(setupCommand, cwd))?.display || null;
+}
+
 async function resolveSetupHook(
   setupCommand: string | undefined,
   cwd: string

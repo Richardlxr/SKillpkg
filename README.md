@@ -102,6 +102,8 @@ skm install owner/repo -y --agent all
 
 When a repository contains multiple skills, interactive install first asks for an optional name/path keyword. Leave it blank to show every skill, or type a keyword such as `reviewer` to narrow the checkbox list before selecting.
 
+Remote skill setup hooks are opt-in. If a remote skill declares `setup_command` or includes a setup script, `skm install` asks before running it in an interactive terminal and skips it in non-interactive shells. Use `--run-scripts` after review, `--no-scripts` to always skip, or `-y` for trusted automation.
+
 Supported agent ids:
 
 ```text
@@ -422,7 +424,7 @@ skm track [name]       Adopt unmanaged native skills into skm without assigning 
 skm assign             Assign skills/MCPs to selected agents
 skm status             Show scope, integrity, and agent injection state
 
-skm install <source>   Install a skill from Git or a local path (--no-save for local-only project use)
+skm install <source>   Install a skill from Git or a local path (--run-scripts only after review)
 skm install            Install skills/MCPs from skm.mod into project scope
 skm uninstall <name>   Remove a skill (current-project skill wins by default)
 skm info <name>        Show detailed information for one skill

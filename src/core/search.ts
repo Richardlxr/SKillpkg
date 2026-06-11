@@ -350,7 +350,8 @@ export async function previewSkill(source: string): Promise<void> {
     console.log(chalk.gray('  └──'));
     logger.blank();
     console.log(`  Install: ${chalk.cyan(`skm install ${source}`)}`);
-    console.log(`  Install (no scripts): ${chalk.cyan(`skm install ${source} --no-scripts`)}`);
+    console.log(`  Install (run scripts after review): ${chalk.cyan(`skm install ${source} --run-scripts`)}`);
+    console.log(`  Install (always skip scripts): ${chalk.cyan(`skm install ${source} --no-scripts`)}`);
     logger.blank();
   } catch (err) {
     spinner.fail(`Preview failed: ${(err as Error).message}`);

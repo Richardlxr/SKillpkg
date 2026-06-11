@@ -217,7 +217,7 @@ export function parseCodexMcpServers(content: string, agent: string): Discovered
 }
 
 function parseCodexMcpTableName(line: string): string | null {
-  const match = line.trim().match(/^\[mcp_servers\.(.+)\]$/);
+  const match = line.trim().match(/^\[mcp_servers\.(.+?)\]\s*(?:#.*)?$/);
   if (!match) return null;
   const key = match[1].trim();
   if (key.startsWith('"')) {
@@ -227,7 +227,7 @@ function parseCodexMcpTableName(line: string): string | null {
 }
 
 function parseTomlString(value: string): string {
-  const trimmed = value.trim();
+  const trimmed = stripTomlInlineComment(value).trim();
   if (!trimmed.startsWith('"')) return trimmed;
   try {
     return JSON.parse(trimmed) as string;
@@ -237,7 +237,7 @@ function parseTomlString(value: string): string {
 }
 
 function parseTomlStringArray(value: string): string[] {
-  const trimmed = value.trim();
+  const trimmed = stripTomlInlineComment(value).trim();
   if (!trimmed.startsWith('[')) return [];
   try {
     const parsed = JSON.parse(trimmed) as unknown;
@@ -262,4 +262,30 @@ function tomlArray(values: string[]): string {
 function tomlInlineTable(values: Record<string, string>): string {
   const entries = Object.entries(values).map(([key, value]) => `${tomlKey(key)} = ${tomlString(value)}`);
   return `{ ${entries.join(', ')} }`;
+}
+
+function stripTomlInlineComment(value: string): string {
+  let inString = false;
+  let escaped = false;
+
+  for (let i = 0; i < value.length; i++) {
+    const char = value[i];
+    if (escaped) {
+      escaped = false;
+      continue;
+    }
+    if (char === '\\' && inString) {
+      escaped = true;
+      continue;
+    }
+    if (char === '"') {
+      inString = !inString;
+      continue;
+    }
+    if (char === '#' && !inString) {
+      return value.slice(0, i);
+    }
+  }
+
+  return value;
 }

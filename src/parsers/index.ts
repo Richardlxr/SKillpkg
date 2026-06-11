@@ -12,6 +12,20 @@ import type {
   SkillFrontmatter
 } from '../types/index.js';
 
+const SAFE_SKILL_NAME = /^[a-zA-Z0-9._-]+$/;
+
+export function isValidSkillName(name: string): boolean {
+  return SAFE_SKILL_NAME.test(name) && name !== '.' && name !== '..';
+}
+
+export function assertValidSkillName(name: string): void {
+  if (!isValidSkillName(name)) {
+    throw new Error(
+      `Invalid skill name "${name}". Skill names may only contain letters, numbers, dots, underscores, and hyphens.`
+    );
+  }
+}
+
 /** Parse SKILL.md frontmatter from a skill directory */
 export async function parseSkillMd(skillDir: string): Promise<SkillFrontmatter | null> {
   const content = await readFileOrNull(join(skillDir, 'SKILL.md'));
@@ -19,9 +33,13 @@ export async function parseSkillMd(skillDir: string): Promise<SkillFrontmatter |
 
   try {
     const { data } = matter(content);
+    const name = normalizeOptionalString(data.name);
+    if (name) {
+      assertValidSkillName(name);
+    }
     return {
-      name: data.name || '',
-      description: data.description || '',
+      name,
+      description: normalizeOptionalString(data.description),
       version: data.version,
       license: data.license,
       compatibility: data.compatibility,
@@ -29,7 +47,7 @@ export async function parseSkillMd(skillDir: string): Promise<SkillFrontmatter |
       'allowed-tools': data['allowed-tools'],
       dependencies: normalizeStringArray(data.dependencies),
       mcp: normalizeStringArray(data.mcp),
-      setup_command: data.setup_command
+      setup_command: typeof data.setup_command === 'string' ? data.setup_command : undefined
     };
   } catch {
     return null;
@@ -55,6 +73,11 @@ export async function parseSkillMdBody(skillDir: string): Promise<string | null>
 function normalizeStringArray(data: unknown): string[] {
   if (!Array.isArray(data)) return [];
   return data.filter((s): s is string => typeof s === 'string');
+}
+
+function normalizeOptionalString(data: unknown): string {
+  if (data === undefined || data === null) return '';
+  return String(data).trim();
 }
 
 /** Normalize unknown data to a string record */

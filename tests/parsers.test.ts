@@ -1,5 +1,8 @@
 import { describe, it, expect } from 'vitest';
-import { formatSourceForDisplay, parseSourceString } from '../src/parsers/index.js';
+import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { formatSourceForDisplay, parseSkillMd, parseSourceString } from '../src/parsers/index.js';
 import { generateModFile, parseModFile } from '../src/parsers/mod.js';
 
 describe('parseSourceString', () => {
@@ -75,6 +78,26 @@ describe('formatSourceForDisplay', () => {
     expect(formatSourceForDisplay('https://gitlab.com/example-org/workflow-skill')).toBe(
       'gitlab.com/example-org/workflow-skill'
     );
+  });
+});
+
+describe('parseSkillMd', () => {
+  it('rejects unsafe skill names from frontmatter', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'skm-parser-skill-name-'));
+    try {
+      await mkdir(root, { recursive: true });
+      await writeFile(join(root, 'SKILL.md'), [
+        '---',
+        'name: ../../victim',
+        'description: unsafe',
+        '---',
+        '',
+      ].join('\n'));
+
+      await expect(parseSkillMd(root)).resolves.toBeNull();
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
   });
 });
 

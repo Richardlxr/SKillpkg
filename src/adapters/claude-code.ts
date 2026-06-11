@@ -3,7 +3,7 @@
  */
 import type { AgentType, InstallScope, McpRegistryEntry, DiscoveredMcp } from '../types/index.js';
 import { AGENT_PATHS } from '../utils/platform.js';
-import { pathExists, readJsonFile, writeJsonFile } from '../utils/fs.js';
+import { pathExists, readJsonFile, readJsonFileForUpdate, writeJsonFile } from '../utils/fs.js';
 import { logger } from '../utils/logger.js';
 import { BaseAdapter } from './base.js';
 
@@ -25,7 +25,11 @@ export class ClaudeCodeAdapter extends BaseAdapter {
     const configPath = AGENT_PATHS['claude-code'].mcpConfig(scope);
     if (!configPath) return;
 
-    const config = (await readJsonFile<Record<string, unknown>>(configPath)) || {};
+    if (scope === 'project') {
+      await this.removeLegacyProjectMcpEntries(mcp.name);
+    }
+
+    const config = await readJsonFileForUpdate<Record<string, unknown>>(configPath);
     const mcpServers = (config['mcpServers'] as Record<string, unknown>) || {};
     const serverName = this.mcpServerName(mcp.name);
 
@@ -50,12 +54,21 @@ export class ClaudeCodeAdapter extends BaseAdapter {
     const configPath = AGENT_PATHS['claude-code'].mcpConfig(scope);
     if (!configPath) return;
 
-    const config = (await readJsonFile<Record<string, unknown>>(configPath)) || {};
+    let removed = false;
+    const config = await readJsonFileForUpdate<Record<string, unknown>>(configPath);
     const mcpServers = (config['mcpServers'] as Record<string, unknown>) || {};
 
     if (this.removeMcpServerEntries(mcpServers, mcpName)) {
       config['mcpServers'] = mcpServers;
       await writeJsonFile(configPath, config);
+      removed = true;
+    }
+
+    if (scope === 'project' && await this.removeLegacyProjectMcpEntries(mcpName)) {
+      removed = true;
+    }
+
+    if (removed) {
       logger.agent(this.displayName, `Removed MCP: ${this.mcpServerName(mcpName)}`);
     }
   }
@@ -87,6 +100,26 @@ export class ClaudeCodeAdapter extends BaseAdapter {
       agent: this.displayName,
       source: 'config' as const,
     }));
+  }
+
+  private async removeLegacyProjectMcpEntries(mcpName: string): Promise<boolean> {
+    const configPath = AGENT_PATHS['claude-code'].mcpConfig('global');
+    if (!(await pathExists(configPath))) return false;
+
+    const config = await readJsonFileForUpdate<Record<string, unknown>>(configPath);
+    const projects = config['projects'] as Record<string, Record<string, unknown>> | undefined;
+    const project = projects?.[process.cwd()];
+    if (!project) return false;
+
+    const mcpServers = project?.['mcpServers'] as Record<string, unknown> | undefined;
+    if (!mcpServers) return false;
+
+    const removed = this.removeMcpServerEntries(mcpServers, mcpName);
+    if (!removed) return false;
+
+    project['mcpServers'] = mcpServers;
+    await writeJsonFile(configPath, config);
+    return true;
   }
 }
 

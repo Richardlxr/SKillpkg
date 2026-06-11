@@ -701,14 +701,18 @@ export async function linkSkill(
   };
 
   const adapters = await resolveAdapters(targetAgent as AgentType | 'all');
+  let actualInstallMode = installMode;
   for (const adapter of adapters) {
-    await adapter.installSkill(skillPkg, scope, { installMode });
+    const adapterInstallMode = await adapter.installSkill(skillPkg, scope, { installMode });
+    if (adapterInstallMode !== installMode) {
+      actualInstallMode = 'copy';
+    }
   }
 
   // Record in DB
   const db = await getDb();
   const now = new Date().toISOString();
-  const symlinkTarget = isSymlinkInstallMode(installMode) ? absPath : null;
+  const symlinkTarget = isSymlinkInstallMode(actualInstallMode) ? absPath : null;
   const unifiedPath = scope === 'project'
     ? join(unifiedProjectSkillsDir(projectPath), frontmatter.name)
     : null;
@@ -716,21 +720,21 @@ export async function linkSkill(
     INSERT OR REPLACE INTO skills (id, name, source_url, source_commit, version, description, scope, project_path, alias, installed_path, unified_path, symlink_target, integrity, install_mode, is_linked, installed_at, updated_at)
     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
   `).run(
-    genId(), frontmatter.name, sourceUrl, isUnifiedProjectLocal ? 'local' : 'linked',
-    frontmatter.version || (isUnifiedProjectLocal ? '0.0.0' : '0.0.0-linked'), frontmatter.description || '',
+    genId(), frontmatter.name, sourceUrl, isUnifiedProjectLocal || actualInstallMode === 'copy' ? 'local' : 'linked',
+    frontmatter.version || (isUnifiedProjectLocal || actualInstallMode === 'copy' ? '0.0.0' : '0.0.0-linked'), frontmatter.description || '',
     scope, projectPath, null, absPath, unifiedPath, symlinkTarget, integrity,
-    installMode, legacyIsLinkedValue(installMode), now, now
+    actualInstallMode, legacyIsLinkedValue(actualInstallMode), now, now
   );
 
-  if (!isDevInstallMode(installMode)) {
+  if (!isDevInstallMode(actualInstallMode)) {
     const target = { scope, projectPath };
     const sumfile = await loadSumfile(target);
     updateSumfileEntry(sumfile, skillPkg);
     await saveSumfile(sumfile, target);
   }
 
-  logger.success(`${installMode === 'copy' ? 'Installed' : 'Linked'} "${frontmatter.name}" from ${absPath}`);
-  if (installMode === 'symlink-dev') {
+  logger.success(`${actualInstallMode === 'copy' ? 'Installed' : 'Linked'} "${frontmatter.name}" from ${absPath}`);
+  if (actualInstallMode === 'symlink-dev') {
     logger.info('Changes to the source directory will be reflected immediately');
   }
   if (scope === 'project') {

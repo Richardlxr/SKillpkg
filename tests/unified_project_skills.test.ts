@@ -67,6 +67,23 @@ describe('unified project skills', () => {
     expect(existsSync(join(projectDir, '.agents', 'skills', 'missing-demo'))).toBe(false);
   });
 
+  it('rejects skill names that would escape the skills directory', async () => {
+    const skillSource = join(root, 'source-skill');
+    const victim = join(projectDir, 'victim');
+    await writeSkill(skillSource, 'safe-demo', 'safe skill');
+    await mkdir(victim, { recursive: true });
+    await writeFile(join(victim, 'marker.txt'), 'keep me');
+
+    const adapter = new ClaudeCodeAdapter();
+    await expect(adapter.installSkill({
+      frontmatter: { name: '../../victim', description: 'unsafe skill' },
+      localPath: skillSource,
+      commit: 'test',
+    }, 'project')).rejects.toThrow(/Invalid skill name/);
+
+    expect(await readFile(join(victim, 'marker.txt'), 'utf-8')).toBe('keep me');
+  });
+
   it('keeps existing unified project-local skill directories in place', async () => {
     const targetSkill = join(projectDir, '.agents', 'skills', 'demo');
     await writeSkill(targetSkill, 'demo', 'demo skill');

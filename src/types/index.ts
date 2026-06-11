@@ -122,7 +122,7 @@ export interface AgentAdapter {
   readonly displayName: string;
   detect(): Promise<boolean>;
   getSkillsDir(scope: InstallScope): string;
-  installSkill(skill: SkillPackage, scope: InstallScope, options?: SkillInstallOptions): Promise<void>;
+  installSkill(skill: SkillPackage, scope: InstallScope, options?: SkillInstallOptions): Promise<InstallMode>;
   uninstallSkill(skillName: string, scope: InstallScope): Promise<void>;
   configureMCP(mcp: McpRegistryEntry, env: Record<string, string>, scope?: InstallScope): Promise<void>;
   removeMCP(mcpName: string, scope?: InstallScope): Promise<void>;
@@ -224,6 +224,7 @@ export interface InstallOptions {
   force?: boolean;
   noDeps?: boolean;         // Skip dependency installation
   noScripts?: boolean;      // Skip lifecycle scripts
+  runScripts?: boolean;     // Explicitly run remote lifecycle scripts
   yes?: boolean;            // Automatically answer yes to prompts
   save?: boolean;           // Save project install to skm.mod
   saveToMod?: boolean;      // Internal: save a recursive install selected by the root request
